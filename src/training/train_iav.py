@@ -44,8 +44,12 @@ class IAVLoss(nn.Module):
         log_probs_chosen = self._get_log_probs(logits_chosen, labels_chosen)
         log_probs_rejected = self._get_log_probs(logits_rejected, labels_rejected)
         
-        log_probs_chosen = (log_probs_chosen * mask_chosen).sum(dim=1) / mask_chosen.sum(dim=1)
-        log_probs_rejected = (log_probs_rejected * mask_rejected).sum(dim=1) / mask_rejected.sum(dim=1)
+        # Adjust masks to match the shifted sequences (remove first token)
+        mask_chosen_shifted = mask_chosen[:, 1:].contiguous()
+        mask_rejected_shifted = mask_rejected[:, 1:].contiguous()
+        
+        log_probs_chosen = (log_probs_chosen * mask_chosen_shifted).sum(dim=1) / mask_chosen_shifted.sum(dim=1)
+        log_probs_rejected = (log_probs_rejected * mask_rejected_shifted).sum(dim=1) / mask_rejected_shifted.sum(dim=1)
         
         preference_loss = -F.logsigmoid(
             self.beta * (log_probs_chosen - log_probs_rejected)

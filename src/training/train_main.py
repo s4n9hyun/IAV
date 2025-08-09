@@ -3,222 +3,126 @@ import argparse
 import os
 import sys
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 from datasets import load_dataset
 
-# Add parent directory to path to import from src
+# Add parent directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from src.training.train_iav import IAVTrainer, IAVLoss
+from src.training.train_iav import IAVTrainer
 from src.models.iav_model import IAVModel
-from src.data.data_utils import prepare_preference_dataset
+from src.data.data_utils import PreferenceDataset, HHRLHFDataset
 
 
 def main():
     parser = argparse.ArgumentParser(description="Train IAV model")
+    parser.add_argument("--model_name_or_path", default="argsearch/llama-7b-sft-float32")
+    parser.add_argument("--dataset_name", default="Anthropic/hh-rlhf")
+    parser.add_argument("--output_dir", default="./outputs")
+    parser.add_argument("--num_train_epochs", type=int, default=1)  # Reduce epochs for faster iteration
+    parser.add_argument("--per_device_train_batch_size", type=int, default=2)  # Smaller batch for memory
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=8)  # Increase to maintain effective batch size
+    parser.add_argument("--learning_rate", type=float, default=2e-5)  # Lower LR for more stable training
+    parser.add_argument("--warmup_ratio", type=float, default=0.03)  # Shorter warmup
+    parser.add_argument("--max_seq_length", type=int, default=1024)  # Shorter sequences for efficiency
+    parser.add_argument("--beta", type=float, default=0.5)  # Increase beta for stronger preference signal
+    parser.add_argument("--lambda_kl", type=float, default=0.01)  # Reduce KL weight (was too high)
+    parser.add_argument("--lambda_l2", type=float, default=0.1)  # Increase L2 to regularize alignment vectors
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--bf16", action="store_true")
+    parser.add_argument("--tf32", action="store_true")
+    parser.add_argument("--gradient_checkpointing", action="store_true")
+    parser.add_argument("--use_wandb", action="store_true")
     
-    # Model arguments
-    parser.add_argument("--model_name_or_path", type=str, default="argsearch/llama-7b-sft-float32",
-                        help="Path to pretrained model or model identifier from huggingface.co/models")
-    parser.add_argument("--dataset_name", type=str, default="Anthropic/hh-rlhf",
-                        help="Dataset name from huggingface datasets")
-    
-    # Training arguments
-    parser.add_argument("--output_dir", type=str, default="./outputs",
-                        help="Output directory for checkpoints")
-    parser.add_argument("--num_train_epochs", type=int, default=3,
-                        help="Total number of training epochs")
-    parser.add_argument("--per_device_train_batch_size", type=int, default=4,
-                        help="Batch size per device during training")
-    parser.add_argument("--per_device_eval_batch_size", type=int, default=4,
-                        help="Batch size per device during evaluation")
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=4,
-                        help="Number of updates steps to accumulate before performing a backward/update pass")
-    parser.add_argument("--learning_rate", type=float, default=5e-5,
-                        help="Initial learning rate")
-    parser.add_argument("--warmup_ratio", type=float, default=0.1,
-                        help="Warmup ratio for learning rate scheduler")
-    parser.add_argument("--max_seq_length", type=int, default=2048,
-                        help="Maximum sequence length")
-    
-    # IAV specific arguments
-    parser.add_argument("--beta", type=float, default=0.1,
-                        help="Beta parameter for IAV loss")
-    parser.add_argument("--lambda_kl", type=float, default=0.1,
-                        help="KL regularization weight")
-    parser.add_argument("--lambda_l2", type=float, default=0.01,
-                        help="L2 regularization weight")
-    parser.add_argument("--num_interventions", type=int, default=8,
-                        help="Number of intervention heads")
-    parser.add_argument("--intervention_dim", type=int, default=256,
-                        help="Dimension of intervention heads")
-    
-    # Other arguments
-    parser.add_argument("--eval_steps", type=int, default=500,
-                        help="Run evaluation every X steps")
-    parser.add_argument("--save_steps", type=int, default=1000,
-                        help="Save checkpoint every X steps")
-    parser.add_argument("--logging_steps", type=int, default=10,
-                        help="Log every X steps")
-    parser.add_argument("--seed", type=int, default=42,
-                        help="Random seed for initialization")
-    parser.add_argument("--bf16", action="store_true",
-                        help="Use bfloat16 precision")
-    parser.add_argument("--tf32", action="store_true",
-                        help="Use tf32 precision")
-    parser.add_argument("--gradient_checkpointing", action="store_true",
-                        help="Use gradient checkpointing")
-    parser.add_argument("--use_wandb", action="store_true",
-                        help="Use Weights & Biases for logging")
-    parser.add_argument("--wandb_project", type=str, default="iav-training",
-                        help="WandB project name")
+    # Unused but kept for compatibility
+    parser.add_argument("--per_device_eval_batch_size", type=int, default=4)
+    parser.add_argument("--num_interventions", type=int, default=8)
+    parser.add_argument("--intervention_dim", type=int, default=256)
+    parser.add_argument("--eval_steps", type=int, default=500)
+    parser.add_argument("--save_steps", type=int, default=1000)
+    parser.add_argument("--logging_steps", type=int, default=10)
+    parser.add_argument("--wandb_project", default="iav-training")
     
     args = parser.parse_args()
     
-    # Set random seed
+    # Setup
     torch.manual_seed(args.seed)
-    
-    # Setup device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+    os.makedirs(args.output_dir, exist_ok=True)
     
     if args.bf16 and device.type == "cuda":
         torch.set_default_dtype(torch.bfloat16)
-    
     if args.tf32 and device.type == "cuda":
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
     
-    # Create output directory
-    os.makedirs(args.output_dir, exist_ok=True)
-    
-    # Load tokenizer
+    # Load tokenizer and config
     print(f"Loading tokenizer from {args.model_name_or_path}")
     tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     
-    # Load base model
-    print(f"Loading base model from {args.model_name_or_path}")
-    base_model = AutoModelForCausalLM.from_pretrained(
-        args.model_name_or_path,
-        torch_dtype=torch.bfloat16 if args.bf16 else torch.float32,
-        device_map="auto" if torch.cuda.device_count() > 1 else None
-    )
+    config = AutoConfig.from_pretrained(args.model_name_or_path)
     
     # Create IAV model
     print("Creating IAV model")
     model = IAVModel(
-        base_model=base_model,
-        num_interventions=args.num_interventions,
-        intervention_dim=args.intervention_dim,
-        hidden_size=base_model.config.hidden_size
-    )
+        base_model_name=args.model_name_or_path,
+        vocab_size=config.vocab_size,
+        hidden_size=config.hidden_size,
+        device=device,
+        freeze_backbone=True,
+        torch_dtype=torch.bfloat16 if args.bf16 else torch.float32
+    ).to(device)
     
-    if device.type == "cuda":
-        model = model.to(device)
+    if args.gradient_checkpointing and hasattr(model.backbone, 'gradient_checkpointing_enable'):
+        model.backbone.gradient_checkpointing_enable()
     
-    if args.gradient_checkpointing:
-        model.gradient_checkpointing_enable()
-    
-    # Load and prepare dataset
+    # Load dataset
     print(f"Loading dataset: {args.dataset_name}")
-    dataset = load_dataset(args.dataset_name)
+    train_data = HHRLHFDataset.load_data(split="train")
+    train_dataset = PreferenceDataset(train_data, tokenizer, args.max_seq_length)
     
-    # Prepare training data
-    train_dataset = prepare_preference_dataset(
-        dataset["train"] if "train" in dataset else dataset,
-        tokenizer=tokenizer,
-        max_length=args.max_seq_length
-    )
-    
-    # Prepare validation data if available
-    val_dataset = None
-    if "validation" in dataset or "test" in dataset:
-        val_split = "validation" if "validation" in dataset else "test"
-        val_dataset = prepare_preference_dataset(
-            dataset[val_split],
-            tokenizer=tokenizer,
-            max_length=args.max_seq_length
-        )
-    
-    # Create data loaders
     from torch.utils.data import DataLoader
-    
     train_dataloader = DataLoader(
-        train_dataset,
-        batch_size=args.per_device_train_batch_size,
-        shuffle=True,
-        num_workers=4,
-        pin_memory=True
+        train_dataset, 
+        batch_size=args.per_device_train_batch_size, 
+        shuffle=True
     )
     
-    val_dataloader = None
-    if val_dataset:
-        val_dataloader = DataLoader(
-            val_dataset,
-            batch_size=args.per_device_eval_batch_size,
-            shuffle=False,
-            num_workers=4,
-            pin_memory=True
-        )
-    
-    # Create optimizer
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=args.learning_rate,
-        weight_decay=0.01
-    )
-    
-    # Create scheduler
-    from transformers import get_linear_schedule_with_warmup
-    
-    num_training_steps = len(train_dataloader) * args.num_train_epochs // args.gradient_accumulation_steps
-    num_warmup_steps = int(num_training_steps * args.warmup_ratio)
-    
-    scheduler = get_linear_schedule_with_warmup(
-        optimizer,
-        num_warmup_steps=num_warmup_steps,
-        num_training_steps=num_training_steps
-    )
-    
-    # Create loss function with reference model
+    # Create reference model
+    print("Loading reference model for KL regularization")
     reference_model = AutoModelForCausalLM.from_pretrained(
         args.model_name_or_path,
-        torch_dtype=torch.bfloat16 if args.bf16 else torch.float32,
-        device_map="auto" if torch.cuda.device_count() > 1 else None
-    )
-    if device.type == "cuda":
-        reference_model = reference_model.to(device)
+        torch_dtype=torch.bfloat16 if args.bf16 else torch.float32
+    ).to(device)
     
-    loss_fn = IAVLoss(
-        beta=args.beta,
-        lambda_kl=args.lambda_kl,
-        lambda_l2=args.lambda_l2,
-        reference_model=reference_model
-    )
+    # Calculate warmup steps
+    num_training_steps = len(train_dataloader) * args.num_train_epochs // args.gradient_accumulation_steps
+    num_warmup_steps = int(num_training_steps * args.warmup_ratio)
     
     # Create trainer
     trainer = IAVTrainer(
         model=model,
-        loss_fn=loss_fn,
-        optimizer=optimizer,
-        scheduler=scheduler,
+        tokenizer=tokenizer,
         train_dataloader=train_dataloader,
-        val_dataloader=val_dataloader,
-        device=device,
+        learning_rate=args.learning_rate,
         num_epochs=args.num_train_epochs,
+        warmup_steps=num_warmup_steps,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
-        max_grad_norm=1.0,
-        save_dir=args.output_dir,
+        beta=args.beta,
+        lambda_kl=args.lambda_kl,
+        lambda_l2=args.lambda_l2,
+        reference_model=reference_model,
+        device=device.type,
         log_wandb=args.use_wandb,
-        wandb_project=args.wandb_project
+        save_dir=args.output_dir
     )
     
-    # Start training
+    # Train
     print("Starting training...")
     trainer.train()
-    
     print("Training completed!")
 
 

@@ -12,15 +12,16 @@ class IAVModel(nn.Module):
         vocab_size: int,
         hidden_size: int,
         device: str = "cuda",
-        freeze_backbone: bool = True
+        freeze_backbone: bool = True,
+        torch_dtype: torch.dtype = torch.float32
     ):
         super().__init__()
         
         self.config = AutoConfig.from_pretrained(base_model_name)
         self.backbone = AutoModelForCausalLM.from_pretrained(
             base_model_name,
-            torch_dtype=torch.float32,
-            device_map=device
+            torch_dtype=torch_dtype,
+            device_map=None
         )
         
         if freeze_backbone:
@@ -29,9 +30,10 @@ class IAVModel(nn.Module):
         
         self.hidden_size = hidden_size
         self.vocab_size = vocab_size
+        self.torch_dtype = torch_dtype
         
-        self.base_head = nn.Linear(hidden_size, vocab_size, bias=False)
-        self.alignment_head = nn.Linear(hidden_size, vocab_size, bias=False)
+        self.base_head = nn.Linear(hidden_size, vocab_size, bias=False, dtype=torch_dtype)
+        self.alignment_head = nn.Linear(hidden_size, vocab_size, bias=False, dtype=torch_dtype)
         
         self._init_heads()
         
