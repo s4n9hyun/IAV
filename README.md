@@ -22,6 +22,18 @@ This achieves ~50% reduction in inference costs compared to methods like GenARM 
 
 ## Installation
 
+### Setup Environment
+
+```bash
+# Create conda environment
+conda create -n iav python=3.10
+conda activate iav
+
+# Install dependencies
+pip install -r requirements.txt
+```
+
+Or install manually:
 ```bash
 pip install torch transformers datasets tqdm wandb matplotlib seaborn pandas pyyaml
 ```
@@ -34,20 +46,38 @@ IAV/
 │   ├── models/
 │   │   └── iav_model.py        # Core IAV architecture
 │   ├── training/
-│   │   └── train_iav.py        # Training module with multi-component loss
+│   │   ├── train_iav.py        # Training module with multi-component loss
+│   │   └── train_main.py       # Main training entry point
 │   ├── data/
 │   │   └── data_utils.py       # Dataset utilities
 │   ├── evaluation/
 │   │   └── evaluate.py         # Evaluation scripts
 │   ├── config.py               # Configuration management
 │   └── inference.py            # Inference with controllable alpha
+├── train.sh                    # Training shell script
+├── requirements.txt            # Python dependencies
 └── paper/
     └── paper.tex              # Research paper
 ```
 
 ## Quick Start
 
-### Training
+### Training with Shell Script
+
+The easiest way to start training:
+
+```bash
+# Use default settings (llama-7b-sft model, hh-rlhf dataset)
+./train.sh
+
+# Or specify custom parameters
+./train.sh <model_name> <dataset_name> <output_dir>
+
+# Example with custom model and dataset
+./train.sh meta-llama/Llama-2-7b-hf ultrafeedback ./outputs/custom_training
+```
+
+### Training with Python
 
 ```python
 from src.models.iav_model import IAVModel
@@ -87,6 +117,25 @@ trainer = IAVTrainer(
     lambda_l2=0.01
 )
 trainer.train()
+```
+
+### Command-line Training
+
+You can also train directly using the command-line interface:
+
+```bash
+python src/training/train_main.py \
+    --model_name_or_path argsearch/llama-7b-sft-float32 \
+    --dataset_name Anthropic/hh-rlhf \
+    --output_dir ./outputs \
+    --num_train_epochs 3 \
+    --per_device_train_batch_size 4 \
+    --learning_rate 5e-5 \
+    --beta 0.1 \
+    --lambda_kl 0.1 \
+    --lambda_l2 0.01 \
+    --bf16 \
+    --gradient_checkpointing
 ```
 
 ### Inference
@@ -135,6 +184,23 @@ controllability = evaluator.evaluate_controllability(safety_prompts)
 evaluator.save_results()
 evaluator.plot_results(all_results)
 ```
+
+## Training Parameters
+
+Key training parameters:
+
+- `--model_name_or_path`: Base model to use (default: `argsearch/llama-7b-sft-float32`)
+- `--dataset_name`: Training dataset (default: `Anthropic/hh-rlhf`)
+- `--num_train_epochs`: Number of training epochs (default: 3)
+- `--per_device_train_batch_size`: Batch size per GPU (default: 4)
+- `--learning_rate`: Learning rate (default: 5e-5)
+- `--beta`: Beta parameter for IAV loss (default: 0.1)
+- `--lambda_kl`: KL regularization weight (default: 0.1)
+- `--lambda_l2`: L2 regularization weight (default: 0.01)
+- `--num_interventions`: Number of intervention heads (default: 8)
+- `--intervention_dim`: Dimension of intervention heads (default: 256)
+- `--bf16`: Use bfloat16 precision for training
+- `--gradient_checkpointing`: Enable gradient checkpointing to save memory
 
 ## Configuration
 
