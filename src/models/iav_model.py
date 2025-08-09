@@ -37,6 +37,10 @@ class IAVModel(nn.Module):
         
         self._init_heads()
         
+        # Move everything to the specified device
+        self.to(device)
+        self.backbone.to(device)
+        
     def _init_heads(self):
         nn.init.xavier_uniform_(self.base_head.weight)
         nn.init.zeros_(self.alignment_head.weight)

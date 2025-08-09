@@ -183,7 +183,9 @@ class IAVTrainer:
         reference_model: Optional[nn.Module] = None,
         device: str = "cuda",
         log_wandb: bool = False,
-        save_dir: str = "./checkpoints"
+        save_dir: str = "./checkpoints",
+        save_steps: int = 1000,
+        eval_steps: int = 500
     ):
         self.model = model
         self.tokenizer = tokenizer
@@ -206,6 +208,7 @@ class IAVTrainer:
             num_training_steps=total_steps
         )
         
+        
         self.loss_fn = IAVLoss(
             beta=beta,
             lambda_kl=lambda_kl,
@@ -218,6 +221,8 @@ class IAVTrainer:
         self.max_grad_norm = max_grad_norm
         self.log_wandb = log_wandb
         self.save_dir = save_dir
+        self.save_steps = save_steps
+        self.eval_steps = eval_steps
         
         os.makedirs(save_dir, exist_ok=True)
         
@@ -269,11 +274,7 @@ class IAVTrainer:
                 loss.backward()
                 
                 if (step + 1) % self.gradient_accumulation_steps == 0:
-                    torch.nn.utils.clip_grad_norm_(
-                        self.model.parameters(),
-                        self.max_grad_norm
-                    )
-                    
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
                     self.optimizer.step()
                     self.scheduler.step()
                     self.optimizer.zero_grad()
@@ -297,6 +298,19 @@ class IAVTrainer:
                         "train/learning_rate": self.scheduler.get_last_lr()[0],
                         "global_step": global_step
                     })
+                
+                # Step-based checkpointing (skip step 0)
+                if global_step > 0 and global_step % self.save_steps == 0:
+                    self.save_checkpoint(epoch, global_step, best=False)
+                
+                # Step-based evaluation
+                if self.val_dataloader is not None and global_step % self.eval_steps == 0:
+                    val_loss = self.validate()
+                    logger.info(f"Step {global_step} - Validation Loss: {val_loss:.4f}")
+                    
+                    if val_loss < best_val_loss:
+                        best_val_loss = val_loss
+                        self.save_checkpoint(epoch, global_step, best=True)
             
             avg_epoch_loss = sum(epoch_losses) / len(epoch_losses)
             logger.info(f"Epoch {epoch + 1} - Average Loss: {avg_epoch_loss:.4f}")
@@ -350,10 +364,16 @@ class IAVTrainer:
         return sum(val_losses) / len(val_losses)
     
     def save_checkpoint(self, epoch: int, global_step: int, best: bool = False):
+        # Only save trainable heads, not the frozen backbone
+        heads_state_dict = {
+            "base_head": self.model.base_head.state_dict(),
+            "alignment_head": self.model.alignment_head.state_dict()
+        }
+            
         checkpoint = {
             "epoch": epoch,
             "global_step": global_step,
-            "model_state_dict": self.model.state_dict(),
+            "heads_state_dict": heads_state_dict,
             "optimizer_state_dict": self.optimizer.state_dict(),
             "scheduler_state_dict": self.scheduler.state_dict()
         }
@@ -363,7 +383,7 @@ class IAVTrainer:
             torch.save(checkpoint, path)
             logger.info(f"Best checkpoint saved to {path}")
         else:
-            path = os.path.join(self.save_dir, f"checkpoint_epoch_{epoch}.pt")
+            path = os.path.join(self.save_dir, f"checkpoint_step_{global_step}.pt")
             torch.save(checkpoint, path)
             logger.info(f"Checkpoint saved to {path}")
             
@@ -375,7 +395,7 @@ class IAVTrainer:
         import glob
         
         # Find all checkpoint files (excluding best_model.pt)
-        pattern = os.path.join(self.save_dir, "checkpoint_epoch_*.pt")
+        pattern = os.path.join(self.save_dir, "checkpoint_step_*.pt")
         checkpoints = glob.glob(pattern)
         
         if len(checkpoints) <= keep_count:
