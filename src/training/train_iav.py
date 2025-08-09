@@ -360,8 +360,34 @@ class IAVTrainer:
         
         if best:
             path = os.path.join(self.save_dir, "best_model.pt")
+            torch.save(checkpoint, path)
+            logger.info(f"Best checkpoint saved to {path}")
         else:
             path = os.path.join(self.save_dir, f"checkpoint_epoch_{epoch}.pt")
+            torch.save(checkpoint, path)
+            logger.info(f"Checkpoint saved to {path}")
+            
+            # Keep only the 3 most recent checkpoints (excluding best_model.pt)
+            self._cleanup_old_checkpoints()
+    
+    def _cleanup_old_checkpoints(self, keep_count: int = 3):
+        """Remove old checkpoints, keeping only the most recent ones"""
+        import glob
         
-        torch.save(checkpoint, path)
-        logger.info(f"Checkpoint saved to {path}")
+        # Find all checkpoint files (excluding best_model.pt)
+        pattern = os.path.join(self.save_dir, "checkpoint_epoch_*.pt")
+        checkpoints = glob.glob(pattern)
+        
+        if len(checkpoints) <= keep_count:
+            return
+        
+        # Sort by modification time (newest first)
+        checkpoints.sort(key=os.path.getmtime, reverse=True)
+        
+        # Remove old checkpoints
+        for old_checkpoint in checkpoints[keep_count:]:
+            try:
+                os.remove(old_checkpoint)
+                logger.info(f"Removed old checkpoint: {old_checkpoint}")
+            except OSError as e:
+                logger.warning(f"Failed to remove {old_checkpoint}: {e}")
