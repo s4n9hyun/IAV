@@ -62,7 +62,7 @@ datasets/
 *.tsv
 *.json
 *.jsonl
-
+*.pkl
 # System files
 .DS_Store
 .DS_Store?

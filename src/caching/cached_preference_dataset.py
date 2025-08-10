@@ -5,10 +5,6 @@ import os
 
 
 class CachedPreferenceDataset(Dataset):
-    """
-    Preference dataset that loads cached reference logits instead of computing them on-the-fly.
-    This dramatically speeds up training by eliminating reference model forward passes.
-    """
     
     def __init__(self, base_dataset, cache_file: str):
         self.base_dataset = base_dataset
@@ -16,45 +12,53 @@ class CachedPreferenceDataset(Dataset):
         
         if not os.path.exists(cache_file):
             raise FileNotFoundError(
-                f"Cache file {cache_file} not found. Run cache_reference_logits.py first."
+                f"Cache file {cache_file} not found. Run ./cache.sh first."
             )
         
         print(f"Loading cached reference logits from {cache_file}")
         with open(cache_file, 'rb') as f:
             self.cache_data = pickle.load(f)
         
-        print(f"Loaded cache with {len(self.cache_data)} samples")
+        cache_size = len(self.cache_data)
+        dataset_size = len(base_dataset)
+        print(f"Loaded cache with {cache_size} samples (dataset has {dataset_size})")
         
-        # Verify cache matches dataset
-        if len(self.cache_data) != len(base_dataset):
-            raise ValueError(
-                f"Cache size ({len(self.cache_data)}) doesn't match dataset size ({len(base_dataset)}). "
-                "Please regenerate the cache."
-            )
+        if cache_size < dataset_size:
+            print(f"WARNING: Using first {cache_size} samples.")
     
     def __len__(self):
-        return len(self.base_dataset)
+        return min(len(self.base_dataset), len(self.cache_data))
     
     def __getitem__(self, idx):
-        # Get base sample
         base_sample = self.base_dataset[idx]
         
-        # Get cached reference logits
         if idx not in self.cache_data:
             raise KeyError(f"Sample {idx} not found in cache")
         
         cached_sample = self.cache_data[idx]
         
-        # Verify input IDs match (safety check)
-        if not torch.equal(base_sample["input_ids_chosen"], cached_sample["chosen_input_ids"]):
-            raise ValueError(f"Sample {idx}: chosen input_ids mismatch between dataset and cache")
+        # Only support dual cache format (chosen + rejected)
+        if "ref_token_logits_chosen" not in cached_sample:
+            raise ValueError(
+                f"Cache file uses old single-cache format. "
+                f"Please regenerate cache with both chosen and rejected logits."
+            )
         
-        if not torch.equal(base_sample["input_ids_rejected"], cached_sample["rejected_input_ids"]):
-            raise ValueError(f"Sample {idx}: rejected input_ids mismatch between dataset and cache")
+        # Verify hash match for both chosen and rejected
+        input_hash_chosen = hash(tuple(base_sample["input_ids_chosen"].tolist()))
+        input_hash_rejected = hash(tuple(base_sample["input_ids_rejected"].tolist()))
         
-        # Return sample with cached reference logits
+        if input_hash_chosen != cached_sample["input_hash_chosen"]:
+            raise ValueError(f"Sample {idx}: chosen hash mismatch")
+        if input_hash_rejected != cached_sample["input_hash_rejected"]:
+            raise ValueError(f"Sample {idx}: rejected hash mismatch")
+        
         return {
             **base_sample,
-            "reference_logits_chosen": cached_sample["chosen_logits"],
-            "reference_logits_rejected": cached_sample["rejected_logits"]
+            "reference_token_logits_chosen": cached_sample["ref_token_logits_chosen"],
+            "reference_token_logits_rejected": cached_sample["ref_token_logits_rejected"],
+            "cached_input_ids_chosen": cached_sample["input_ids_chosen"],
+            "cached_attention_mask_chosen": cached_sample["attention_mask_chosen"],
+            "cached_input_ids_rejected": cached_sample["input_ids_rejected"],
+            "cached_attention_mask_rejected": cached_sample["attention_mask_rejected"]
         }

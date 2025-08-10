@@ -11,7 +11,7 @@ echo ""
 # Default values
 MODEL_NAME="argsearch/llama-7b-sft-float32"
 SEQ_LENGTH=1024
-BATCH_SIZE=16
+BATCH_SIZE=32
 MAX_SAMPLES=""
 CACHE_FILE=""
 

@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, Tuple, Dict
 from transformers import AutoModelForCausalLM, AutoConfig
+import copy
 
 
 class IAVModel(nn.Module):
@@ -18,11 +19,17 @@ class IAVModel(nn.Module):
         super().__init__()
         
         self.config = AutoConfig.from_pretrained(base_model_name)
-        self.backbone = AutoModelForCausalLM.from_pretrained(
+        
+        # Load full model
+        full_model = AutoModelForCausalLM.from_pretrained(
             base_model_name,
             torch_dtype=torch_dtype,
             device_map=None
         )
+        
+        # Separate backbone (transformer) and lm_head
+        self.backbone = full_model.model  # Transformer layers only
+        original_lm_head = full_model.lm_head  # Pre-trained lm_head with knowledge
         
         if freeze_backbone:
             for param in self.backbone.parameters():
@@ -32,18 +39,21 @@ class IAVModel(nn.Module):
         self.vocab_size = vocab_size
         self.torch_dtype = torch_dtype
         
-        self.base_head = nn.Linear(hidden_size, vocab_size, bias=False, dtype=torch_dtype)
-        self.alignment_head = nn.Linear(hidden_size, vocab_size, bias=False, dtype=torch_dtype)
+        # base_head inherits pre-trained weights (knowledge)
+        self.base_head = original_lm_head
         
-        self._init_heads()
+        # alignment_head is a copy that will learn alignment adjustments
+        self.alignment_head = copy.deepcopy(original_lm_head)
+        nn.init.zeros_(self.alignment_head.weight)  # Start from zero for alignment
         
-        # Move everything to the specified device
+        # Make both heads trainable
+        for param in self.base_head.parameters():
+            param.requires_grad = True
+        for param in self.alignment_head.parameters():
+            param.requires_grad = True
+        
+        # Move everything to device
         self.to(device)
-        self.backbone.to(device)
-        
-    def _init_heads(self):
-        nn.init.xavier_uniform_(self.base_head.weight)
-        nn.init.zeros_(self.alignment_head.weight)
         
     def get_hidden_states(
         self,
@@ -51,14 +61,15 @@ class IAVModel(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        outputs = self.backbone.model(
+        # Now backbone is just the transformer layers (no lm_head)
+        outputs = self.backbone(
             input_ids=input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
-            output_hidden_states=True,
-            return_dict=True
+            use_cache=False
         )
-        return outputs.hidden_states[-1]
+        # Get the last hidden states
+        return outputs.last_hidden_state if hasattr(outputs, 'last_hidden_state') else outputs[0]
     
     def forward(
         self,
