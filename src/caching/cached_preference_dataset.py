@@ -53,12 +53,10 @@ class CachedPreferenceDataset(Dataset):
         if input_hash_rejected != cached_sample["input_hash_rejected"]:
             raise ValueError(f"Sample {idx}: rejected hash mismatch")
         
+        # Return base sample with cached reference logits added
+        # No need to return cached input_ids/attention_mask as they're already in base_sample
         return {
             **base_sample,
             "reference_token_logits_chosen": cached_sample["ref_token_logits_chosen"],
-            "reference_token_logits_rejected": cached_sample["ref_token_logits_rejected"],
-            "cached_input_ids_chosen": cached_sample["input_ids_chosen"],
-            "cached_attention_mask_chosen": cached_sample["attention_mask_chosen"],
-            "cached_input_ids_rejected": cached_sample["input_ids_rejected"],
-            "cached_attention_mask_rejected": cached_sample["attention_mask_rejected"]
+            "reference_token_logits_rejected": cached_sample["ref_token_logits_rejected"]
         }

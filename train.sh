@@ -20,13 +20,17 @@ if [ "$NUM_GPUS" -gt 1 ]; then
     accelerate launch \
         --config_file accelerate_config.yaml \
         src/training/train_main.py \
-        --save_steps 50 \
-        --eval_steps 50 \
+        --bf16 \
+        --cache_file cache_argsearch_llama-7b-sft-float32_seq1024.pkl \
+        --save_steps 1000 \
+        --eval_steps 500 \
         "$@"
 else
     echo "Only 1 GPU detected, falling back to single GPU training"
     CUDA_VISIBLE_DEVICES=0 python src/training/train_main.py \
-        --save_steps 50 \
-        --eval_steps 50 \
+        --bf16 \
+        --cache_file cache_argsearch_llama-7b-sft-float32_seq1024.pkl \
+        --save_steps 100 \
+        --eval_steps 200 \
         "$@"
 fi

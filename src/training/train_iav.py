@@ -110,21 +110,24 @@ class IAVLoss(nn.Module):
                     attention_mask=attention_mask
                 )
                 ref_logits = ref_outputs.logits if hasattr(ref_outputs, 'logits') else ref_outputs
+
+            # Unify KL calculation method - use MSE between token logits (same as cached version)
+            batch_size, seq_len, vocab_size = base_logits.shape
             
+            # Gather base model logits for actual tokens
+            input_ids_expanded = input_ids.unsqueeze(-1)  # [batch, seq_len, 1]
+            base_token_logits = torch.gather(base_logits, dim=2, index=input_ids_expanded).squeeze(-1)  # [batch, seq_len]
+            
+            # Gather reference model logits for actual tokens
+            ref_token_logits = torch.gather(ref_logits, dim=2, index=input_ids_expanded).squeeze(-1)  # [batch, seq_len]
+
             # Convert to float32 for numerical stability
-            base_logits = base_logits.float()
-            ref_logits = ref_logits.float()
+            base_token_logits = base_token_logits.float()
+            ref_token_logits = ref_token_logits.float()
             attention_mask = attention_mask.float()
             
-            base_probs = F.softmax(base_logits, dim=-1)
-            ref_probs = F.softmax(ref_logits, dim=-1)
-            
-            kl_div = F.kl_div(
-                base_probs.log(),
-                ref_probs,
-                reduction='none'
-            ).sum(dim=-1)
-            
+            # Compute MSE loss between token logits (unified with cached version)
+            kl_div = F.mse_loss(base_token_logits, ref_token_logits, reduction='none')  # [batch, seq_len]
             kl_div = (kl_div * attention_mask).sum() / attention_mask.sum()
         
         return kl_div
@@ -380,10 +383,10 @@ class IAVTrainer:
                     labels_rejected=batch["labels_rejected"],
                     mask_chosen=batch["attention_mask_chosen"],
                     mask_rejected=batch["attention_mask_rejected"],
-                    input_ids_chosen=batch.get("cached_input_ids_chosen", batch["input_ids_chosen"]),
-                    attention_mask_chosen=batch.get("cached_attention_mask_chosen", batch["attention_mask_chosen"]),
-                    input_ids_rejected=batch.get("cached_input_ids_rejected", batch["input_ids_rejected"]),
-                    attention_mask_rejected=batch.get("cached_attention_mask_rejected", batch["attention_mask_rejected"]),
+                    input_ids_chosen=batch["input_ids_chosen"],
+                    attention_mask_chosen=batch["attention_mask_chosen"],
+                    input_ids_rejected=batch["input_ids_rejected"],
+                    attention_mask_rejected=batch["attention_mask_rejected"],
                     cached_ref_logits_chosen=batch.get("reference_token_logits_chosen"),
                     cached_ref_logits_rejected=batch.get("reference_token_logits_rejected")
                 )
@@ -477,10 +480,10 @@ class IAVTrainer:
                     labels_rejected=batch["labels_rejected"],
                     mask_chosen=batch["attention_mask_chosen"],
                     mask_rejected=batch["attention_mask_rejected"],
-                    input_ids_chosen=batch.get("cached_input_ids_chosen", batch["input_ids_chosen"]),
-                    attention_mask_chosen=batch.get("cached_attention_mask_chosen", batch["attention_mask_chosen"]),
-                    input_ids_rejected=batch.get("cached_input_ids_rejected", batch["input_ids_rejected"]),
-                    attention_mask_rejected=batch.get("cached_attention_mask_rejected", batch["attention_mask_rejected"]),
+                    input_ids_chosen=batch["input_ids_chosen"],
+                    attention_mask_chosen=batch["attention_mask_chosen"],
+                    input_ids_rejected=batch["input_ids_rejected"],
+                    attention_mask_rejected=batch["attention_mask_rejected"],
                     cached_ref_logits_chosen=batch.get("reference_token_logits_chosen"),
                     cached_ref_logits_rejected=batch.get("reference_token_logits_rejected")
                 )
@@ -491,6 +494,10 @@ class IAVTrainer:
         return sum(val_losses) / len(val_losses)
     
     def save_checkpoint(self, epoch: int, global_step: int, best: bool = False):
+        # Only save on main process in multi-GPU training
+        if self.accelerator and not self.accelerator.is_main_process:
+            return
+            
         # Unwrap model to access original attributes (handles DDP wrapper)
         if self.accelerator:
             unwrapped_model = self.accelerator.unwrap_model(self.model)
@@ -523,10 +530,57 @@ class IAVTrainer:
             # Keep only the 3 most recent checkpoints (excluding best_model.pt)
             self._cleanup_old_checkpoints()
     
+    def load_checkpoint(self, checkpoint_path: str):
+        """Load checkpoint and resume training from saved state"""
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+        
+        logger.info(f"Loading checkpoint from {checkpoint_path}")
+        
+        # Load checkpoint
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        
+        # Get unwrapped model for loading state dict
+        if self.accelerator:
+            unwrapped_model = self.accelerator.unwrap_model(self.model)
+        else:
+            unwrapped_model = self.model
+        
+        # Load model state (only trainable heads)
+        if "heads_state_dict" in checkpoint:
+            unwrapped_model.base_head.load_state_dict(checkpoint["heads_state_dict"]["base_head"])
+            unwrapped_model.alignment_head.load_state_dict(checkpoint["heads_state_dict"]["alignment_head"])
+            logger.info("Loaded model heads state dict")
+        else:
+            logger.warning("No heads_state_dict found in checkpoint")
+        
+        # Load optimizer state
+        if "optimizer_state_dict" in checkpoint:
+            self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            logger.info("Loaded optimizer state dict")
+        
+        # Load scheduler state
+        if "scheduler_state_dict" in checkpoint:
+            self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+            logger.info("Loaded scheduler state dict")
+        
+        # Return checkpoint info for resuming training
+        resume_info = {
+            "epoch": checkpoint.get("epoch", 0),
+            "global_step": checkpoint.get("global_step", 0)
+        }
+        
+        logger.info(f"Resuming from epoch {resume_info['epoch']}, step {resume_info['global_step']}")
+        return resume_info
+    
     def _cleanup_old_checkpoints(self, keep_count: int = 3):
         """Remove old checkpoints, keeping only the most recent ones"""
         import glob
         
+        # Only cleanup on main process
+        if self.accelerator and not self.accelerator.is_main_process:
+            return
+            
         # Find all checkpoint files (excluding best_model.pt)
         pattern = os.path.join(self.save_dir, "checkpoint_step_*.pt")
         checkpoints = glob.glob(pattern)
@@ -534,13 +588,22 @@ class IAVTrainer:
         if len(checkpoints) <= keep_count:
             return
         
+        # Filter out non-existent files (in case another process already deleted them)
+        checkpoints = [cp for cp in checkpoints if os.path.exists(cp)]
+        
+        if len(checkpoints) <= keep_count:
+            return
+            
         # Sort by modification time (newest first)
         checkpoints.sort(key=os.path.getmtime, reverse=True)
         
         # Remove old checkpoints
         for old_checkpoint in checkpoints[keep_count:]:
             try:
-                os.remove(old_checkpoint)
-                logger.info(f"Removed old checkpoint: {old_checkpoint}")
+                if os.path.exists(old_checkpoint):  # Double-check before deletion
+                    os.remove(old_checkpoint)
+                    logger.info(f"Removed old checkpoint: {old_checkpoint}")
             except OSError as e:
-                logger.warning(f"Failed to remove {old_checkpoint}: {e}")
+                # Not an error if file doesn't exist (another process may have deleted it)
+                if e.errno != 2:  # errno 2 = FileNotFoundError
+                    logger.warning(f"Failed to remove {old_checkpoint}: {e}")

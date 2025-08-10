@@ -20,11 +20,12 @@ class IAVModel(nn.Module):
         
         self.config = AutoConfig.from_pretrained(base_model_name)
         
-        # Load full model
+        # Load full model with FlashAttention-2
         full_model = AutoModelForCausalLM.from_pretrained(
             base_model_name,
             torch_dtype=torch_dtype,
-            device_map=None
+            device_map=None,
+            attn_implementation="flash_attention_2"
         )
         
         # Separate backbone (transformer) and lm_head

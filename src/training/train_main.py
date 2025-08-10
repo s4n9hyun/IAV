@@ -25,8 +25,8 @@ def main():
     parser.add_argument("--grad_accum", type=int, default=1)
     parser.add_argument("--learning_rate", type=float, default=2e-5)
     parser.add_argument("--seq_length", type=int, default=1024)
-    parser.add_argument("--save_steps", type=int, default=500)
-    parser.add_argument("--eval_steps", type=int, default=500)
+    parser.add_argument("--save_steps", type=int, default=1000)
+    parser.add_argument("--eval_steps", type=int, default=1000)
     parser.add_argument("--num_epochs", type=int, default=1)
     parser.add_argument("--warmup_ratio", type=float, default=0.03)
     parser.add_argument("--beta", type=float, default=0.5)
@@ -36,6 +36,7 @@ def main():
     parser.add_argument("--gradient_checkpointing", action="store_true")
     parser.add_argument("--use_wandb", action="store_true")
     parser.add_argument("--cache_file", default="cache_argsearch_llama-7b-sft-float32_seq1024.pkl", help="Path to cached reference logits file")
+    parser.add_argument("--resume_from_checkpoint", type=str, default=None, help="Path to checkpoint file to resume training from")
     
     args = parser.parse_args()
     
@@ -76,27 +77,50 @@ def main():
     base_train_dataset = PreferenceDataset(train_data, tokenizer, args.seq_length)
     base_val_dataset = PreferenceDataset(val_data, tokenizer, args.seq_length)
     
-    # Initialize reference_model as None
+    # Use full test split for validation (8552 samples)
+    if accelerator.is_main_process:
+        print(f"Using full validation set: {len(base_val_dataset)} samples from test split")
+    
+    # Initialize reference_model as None - will only be loaded if no caches exist
     reference_model = None
     
+    # Check for validation cache file
+    # Handle both old (cache_dual_*) and new (cache_*) naming patterns
+    if "cache_dual_" in args.cache_file:
+        val_cache_file = args.cache_file.replace("cache_dual_", "cache_val_dual_")
+    else:
+        val_cache_file = args.cache_file.replace("cache_", "cache_val_dual_")
+    
+    # Setup training dataset with cache if available
     if os.path.exists(args.cache_file):
         if accelerator.is_main_process:
             print(f"Using cached reference logits for training: {args.cache_file}")
-            print("Validation will proceed without a live reference model (KL loss will be 0).")
         train_dataset = CachedPreferenceDataset(base_train_dataset, args.cache_file)
-        val_dataset = base_val_dataset  # No cache for validation (different data split)
-        # DO NOT load reference_model when using cache to save memory
     else:
         if accelerator.is_main_process:
-            print(f"WARNING: Cache file {args.cache_file} not found!")
+            print(f"WARNING: Training cache file {args.cache_file} not found!")
             print("Run ./cache.sh first to generate cache for faster training")
-            print("Falling back to live reference model (slow)")
         train_dataset = base_train_dataset
+    
+    # Setup validation dataset with cache if available
+    if os.path.exists(val_cache_file):
+        if accelerator.is_main_process:
+            print(f"Using cached reference logits for validation: {val_cache_file}")
+        val_dataset = CachedPreferenceDataset(base_val_dataset, val_cache_file)
+    else:
+        if accelerator.is_main_process:
+            print(f"WARNING: Validation cache file {val_cache_file} not found!")
+            print("Run ./cache_val.sh to generate validation cache")
         val_dataset = base_val_dataset
-        # Only load reference_model when NOT using cache
+    
+    # Only load reference model if neither cache exists
+    if not os.path.exists(args.cache_file) or not os.path.exists(val_cache_file):
+        if accelerator.is_main_process:
+            print("Loading reference model (at least one cache is missing)...")
         reference_model = AutoModelForCausalLM.from_pretrained(
             args.model_name_or_path,
-            torch_dtype=torch.bfloat16 if args.bf16 else torch.float32
+            torch_dtype=torch.bfloat16 if args.bf16 else torch.float32,
+            attn_implementation="flash_attention_2"
         )
     
     train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
@@ -136,6 +160,12 @@ def main():
         eval_steps=args.eval_steps,
         log_wandb=args.use_wandb
     )
+    
+    # Resume from checkpoint if specified
+    if args.resume_from_checkpoint:
+        if accelerator.is_main_process:
+            print(f"Resuming training from: {args.resume_from_checkpoint}")
+        trainer.load_checkpoint(args.resume_from_checkpoint)
     
     if accelerator.is_main_process:
         print("Starting training...")

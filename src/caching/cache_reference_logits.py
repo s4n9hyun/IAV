@@ -19,7 +19,8 @@ def cache_reference_logits(
     batch_size: int = 4,
     cache_file: str = "reference_logits_cache.pkl",
     device: str = "cuda",
-    max_samples: int = None
+    max_samples: int = None,
+    split: str = "train"  # Add split parameter for train/test
 ):
     
     print(f"Loading reference model: {model_name}")
@@ -32,22 +33,22 @@ def cache_reference_logits(
     ).to(device)
     reference_model.eval()
     
-    print("Loading training dataset...")
-    train_data = HHRLHFDataset.load_data(split="train")
-    train_dataset = PreferenceDataset(train_data, tokenizer, seq_length)
+    print(f"Loading {split} dataset...")
+    data = HHRLHFDataset.load_data(split=split)
+    dataset = PreferenceDataset(data, tokenizer, seq_length)
     
     if max_samples:
-        print(f"Limiting to first {max_samples} samples for testing")
+        print(f"Limiting to first {max_samples} samples")
         from torch.utils.data import Subset
-        train_dataset = Subset(train_dataset, range(min(max_samples, len(train_dataset))))
+        dataset = Subset(dataset, range(min(max_samples, len(dataset))))
     
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
     
-    print(f"Caching reference logits for {len(train_dataset)} samples (chosen + rejected)...")
+    print(f"Caching reference logits for {len(dataset)} samples (chosen + rejected) from {split} split...")
     cache_data = {}
     
     with torch.no_grad():
-        for batch_idx, batch in enumerate(tqdm(train_dataloader, desc="Caching")):
+        for batch_idx, batch in enumerate(tqdm(dataloader, desc="Caching")):
             batch = {k: v.to(device) for k, v in batch.items()}
             
             # Cache reference logits for chosen responses
@@ -76,16 +77,13 @@ def cache_reference_logits(
                 token_logits_rejected = torch.gather(full_logits_rejected, 1, input_ids_rejected.unsqueeze(1)).squeeze(1)
                 
                 cache_data[sample_idx] = {
-                    # Chosen reference logits
-                    "ref_token_logits_chosen": token_logits_chosen.cpu(),
-                    "input_ids_chosen": input_ids_chosen.cpu(),
-                    "attention_mask_chosen": batch["attention_mask_chosen"][i].cpu(),
-                    "input_hash_chosen": hash(tuple(input_ids_chosen.cpu().tolist())),
+                    # Only store the essential reference logits, not the input data
+                    # Input data is already in the dataset
+                    "ref_token_logits_chosen": token_logits_chosen.cpu().half(),  # Use half precision to save space
+                    "ref_token_logits_rejected": token_logits_rejected.cpu().half(),  # Use half precision to save space
                     
-                    # Rejected reference logits
-                    "ref_token_logits_rejected": token_logits_rejected.cpu(),
-                    "input_ids_rejected": input_ids_rejected.cpu(),
-                    "attention_mask_rejected": batch["attention_mask_rejected"][i].cpu(),
+                    # Keep hashes for validation/debugging
+                    "input_hash_chosen": hash(tuple(input_ids_chosen.cpu().tolist())),
                     "input_hash_rejected": hash(tuple(input_ids_rejected.cpu().tolist()))
                 }
     
@@ -97,8 +95,9 @@ def cache_reference_logits(
     cache_size_gb = os.path.getsize(cache_file) / 1024**3
     print(f"Cache size: {cache_size_gb:.2f} GB")
     
-    expected_size_mb = len(cache_data) * seq_length * 2 * 4 / 1024 / 1024  # 2x for chosen+rejected
-    print(f"Expected size: ~{expected_size_mb:.0f} MB (doubled for chosen + rejected)")
+    # Calculate expected size: samples * seq_length * 2 (chosen+rejected) * 2 bytes (half precision)
+    expected_size_mb = len(cache_data) * seq_length * 2 * 2 / 1024 / 1024
+    print(f"Expected size: ~{expected_size_mb:.0f} MB (half precision, chosen + rejected logits only)")
     
     if cache_size_gb > 5:
         print("WARNING: Cache too large!")
@@ -113,6 +112,7 @@ if __name__ == "__main__":
     parser.add_argument("--cache_file", default="reference_logits_cache.pkl")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--max_samples", type=int, help="Limit cache to N samples for testing")
+    parser.add_argument("--split", default="train", choices=["train", "test"], help="Dataset split to cache")
     
     args = parser.parse_args()
     
@@ -122,5 +122,6 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         cache_file=args.cache_file,
         device=args.device,
-        max_samples=args.max_samples
+        max_samples=args.max_samples,
+        split=args.split
     )
