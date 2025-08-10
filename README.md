@@ -5,7 +5,7 @@ Implementation of the Inherent Alignment Vectors framework for efficient test-ti
 ## Overview
 
 IAV introduces a novel dual-head architecture where a single LLM learns to generate both:
-- **Base logits** (z_base): Raw knowledge representation
+- **Base logits** (z_base): Raw knowledge representation from frozen backbone
 - **Alignment vectors** (a_t): Learned directional adjustments for human preferences
 
 The final output is computed as: `z_final = z_base + α * a_t`
@@ -14,15 +14,14 @@ This achieves ~50% reduction in inference costs compared to methods like GenARM 
 
 ## Key Features
 
-- Single-model architecture eliminating external reward models
-- Controllable alignment strength via α parameter
-- DPO-style training with dual regularization
-- Support for HH-RLHF and UltraFeedback datasets
-- Comprehensive evaluation suite
+- **Single-model architecture** eliminating external reward models
+- **Controllable alignment strength** via α parameter at inference time
+- **DPO-style training** with dual KL regularization (chosen + rejected)
+- **Efficient caching system** for reference model logits
+- **Multi-GPU support** with automatic device detection
+- **Memory-efficient training** with gradient checkpointing
 
 ## Installation
-
-### Setup Environment
 
 ```bash
 # Create conda environment
@@ -30,12 +29,7 @@ conda create -n iav python=3.10
 conda activate iav
 
 # Install dependencies
-pip install -r requirements.txt
-```
-
-Or install manually:
-```bash
-pip install torch transformers datasets tqdm wandb matplotlib seaborn pandas pyyaml
+pip install torch transformers datasets accelerate tqdm wandb pyyaml
 ```
 
 ## Project Structure
@@ -44,223 +38,207 @@ pip install torch transformers datasets tqdm wandb matplotlib seaborn pandas pyy
 IAV/
 ├── src/
 │   ├── models/
-│   │   └── iav_model.py        # Core IAV architecture
+│   │   └── iav_model.py          # Core IAV dual-head architecture
 │   ├── training/
-│   │   ├── train_iav.py        # Training module with multi-component loss
-│   │   └── train_main.py       # Main training entry point
+│   │   ├── train_iav.py          # IAVLoss and IAVTrainer implementation
+│   │   └── train_main.py         # Main training entry point
 │   ├── data/
-│   │   └── data_utils.py       # Dataset utilities
-│   ├── evaluation/
-│   │   └── evaluate.py         # Evaluation scripts
-│   ├── config.py               # Configuration management
-│   └── inference.py            # Inference with controllable alpha
-├── train.sh                    # Training shell script
-├── requirements.txt            # Python dependencies
-└── paper/
-    └── paper.tex              # Research paper
+│   │   ├── data_utils.py         # Dataset utilities
+│   │   └── datasets.py           # HH-RLHF dataset loader
+│   ├── caching/
+│   │   ├── cache_reference_logits.py  # Generate reference logits cache
+│   │   └── cached_preference_dataset.py # Cached dataset wrapper
+│   └── inference.py              # Inference with controllable alpha
+├── train.sh                      # Training launcher script
+├── cache.sh                      # Cache generation script
+└── requirements.txt              # Python dependencies
 ```
 
 ## Quick Start
 
-### Training with Shell Script
+### 1. Generate Reference Logits Cache (Recommended)
 
-The easiest way to start training:
+Before training, generate a cache of reference model logits to significantly speed up training:
 
 ```bash
-# Use default settings (llama-7b-sft model, hh-rlhf dataset)
+# Generate dual cache (chosen + rejected) for KL regularization
+./cache.sh
+
+# Or manually:
+python src/caching/cache_reference_logits.py \
+    --model_name argsearch/llama-7b-sft-float32 \
+    --dataset_name Anthropic/hh-rlhf \
+    --split train \
+    --max_seq_length 2048 \
+    --output_path ./cache/reference_logits_dual_hh_train_2048.pt
+```
+
+This creates a cache containing reference model logits for both chosen and rejected responses, enabling efficient dual KL regularization during training.
+
+### 2. Training
+
+```bash
+# Use default settings (auto-detects GPU count)
 ./train.sh
 
-# Or specify custom parameters
+# Custom parameters
 ./train.sh <model_name> <dataset_name> <output_dir>
 
-# Example with custom model and dataset
-./train.sh meta-llama/Llama-2-7b-hf ultrafeedback ./outputs/custom_training
+# Example with specific configuration
+./train.sh argsearch/llama-7b-sft-float32 hh-rlhf ./outputs/iav_training
 ```
 
-### Training with Python
+The training script automatically:
+- Detects available GPUs and uses `accelerate` for multi-GPU training
+- Falls back to single GPU if only one is available
+- Uses cached reference logits if available
+- Saves checkpoints every 500 steps
 
-```python
-from src.models.iav_model import IAVModel
-from src.training.train_iav import IAVTrainer
-from src.data.data_utils import create_dataloaders
-from src.config import IAVConfig
-from transformers import AutoTokenizer
-
-# Load configuration
-config = IAVConfig()
-
-# Initialize model
-model = IAVModel(
-    base_model_name="argsearch/llama-7b-sft-float32",
-    vocab_size=32000,
-    hidden_size=4096,
-    freeze_backbone=True
-)
-
-# Prepare data
-tokenizer = AutoTokenizer.from_pretrained("argsearch/llama-7b-sft-float32")
-train_loader, val_loader = create_dataloaders(
-    tokenizer=tokenizer,
-    train_config={"datasets": [{"name": "hh-rlhf", "split": "train"}]},
-    val_config={"datasets": [{"name": "hh-rlhf", "split": "test"}]},
-    batch_size=8
-)
-
-# Train
-trainer = IAVTrainer(
-    model=model,
-    tokenizer=tokenizer,
-    train_dataloader=train_loader,
-    val_dataloader=val_loader,
-    beta=0.1,
-    lambda_kl=0.1,
-    lambda_l2=0.01
-)
-trainer.train()
-```
-
-### Command-line Training
-
-You can also train directly using the command-line interface:
+### 3. Command-line Training Options
 
 ```bash
 python src/training/train_main.py \
     --model_name_or_path argsearch/llama-7b-sft-float32 \
-    --dataset_name Anthropic/hh-rlhf \
     --output_dir ./outputs \
-    --num_train_epochs 3 \
-    --per_device_train_batch_size 4 \
+    --cache_file ./cache/reference_logits_dual_hh_train_2048.pt \
+    --num_epochs 1 \
+    --batch_size 4 \
+    --grad_accum 1 \
     --learning_rate 5e-5 \
     --beta 0.1 \
     --lambda_kl 0.1 \
     --lambda_l2 0.01 \
+    --seq_length 2048 \
+    --warmup_ratio 0.1 \
+    --save_steps 500 \
+    --eval_steps 100 \
     --bf16 \
     --gradient_checkpointing
 ```
 
-### Inference
+## Training Details
+
+### Loss Function
+
+The IAV training objective combines three components:
+
+```
+L_total = L_pref + λ_kl * L_kl + λ_l2 * L_l2
+```
+
+Where:
+- **L_pref**: DPO-style preference loss
+- **L_kl**: KL divergence from reference model (applied to both chosen and rejected)
+- **L_l2**: L2 regularization on alignment vectors
+
+### Dual KL Regularization
+
+IAV applies KL regularization to **both chosen and rejected responses** to prevent the model from gaming the loss:
 
 ```python
-from src.inference import IAVInference
+L_kl = (L_kl_chosen + L_kl_rejected) / 2.0
+```
 
-# Initialize inference
-inference = IAVInference(model, tokenizer, default_alpha=1.0)
+This ensures the base head maintains consistency with the reference model for all types of responses.
+
+### Memory Optimization
+
+- **Frozen Backbone**: Only trains the dual heads (~2% of parameters)
+- **Gradient Checkpointing**: Reduces memory usage during backprop
+- **Reference Logits Caching**: Eliminates need for reference model in memory
+- **BFloat16 Training**: Uses mixed precision for efficiency
+
+## Inference
+
+```python
+from src.models.iav_model import IAVModel
+from transformers import AutoTokenizer
+
+# Load model and tokenizer
+model = IAVModel.from_pretrained("./outputs/iav_training/checkpoint-5000")
+tokenizer = AutoTokenizer.from_pretrained("argsearch/llama-7b-sft-float32")
 
 # Generate with different alignment strengths
-response = inference.generate(
-    prompt="How do I hack a bank account?",
-    alpha=1.5,  # Strong alignment
-    max_length=128,
-    temperature=0.7
-)
+prompt = "How can I help you today?"
 
-# Compare different alpha values
-results = inference.compare_alphas(
-    prompt="Write a story about AI",
-    alphas=[0.0, 0.5, 1.0, 1.5]
-)
+# No alignment (raw model)
+response_raw = model.generate(prompt, alpha=0.0)
 
-# Analyze alignment effects
-analysis = inference.analyze_alignment_effect(
-    prompt="How to make explosives",
-    alpha=1.0
-)
-```
+# Standard alignment
+response_aligned = model.generate(prompt, alpha=1.0)
 
-### Evaluation
-
-```python
-from src.evaluation.evaluate import IAVEvaluator
-
-evaluator = IAVEvaluator(model, tokenizer, config)
-
-# Run comprehensive evaluation
-performance = evaluator.evaluate_performance(test_prompts)
-efficiency = evaluator.evaluate_efficiency(test_prompts)
-alignment_analysis = evaluator.analyze_alignment_vectors(test_prompts)
-controllability = evaluator.evaluate_controllability(safety_prompts)
-
-# Save and visualize results
-evaluator.save_results()
-evaluator.plot_results(all_results)
-```
-
-## Training Parameters
-
-Key training parameters:
-
-- `--model_name_or_path`: Base model to use (default: `argsearch/llama-7b-sft-float32`)
-- `--dataset_name`: Training dataset (default: `Anthropic/hh-rlhf`)
-- `--num_train_epochs`: Number of training epochs (default: 3)
-- `--per_device_train_batch_size`: Batch size per GPU (default: 4)
-- `--learning_rate`: Learning rate (default: 5e-5)
-- `--beta`: Beta parameter for IAV loss (default: 0.1)
-- `--lambda_kl`: KL regularization weight (default: 0.1)
-- `--lambda_l2`: L2 regularization weight (default: 0.01)
-- `--num_interventions`: Number of intervention heads (default: 8)
-- `--intervention_dim`: Dimension of intervention heads (default: 256)
-- `--bf16`: Use bfloat16 precision for training
-- `--gradient_checkpointing`: Enable gradient checkpointing to save memory
-
-## Configuration
-
-Create a YAML configuration file:
-
-```yaml
-model:
-  base_model_name: argsearch/llama-7b-sft-float32
-  vocab_size: 32000
-  hidden_size: 4096
-  freeze_backbone: true
-
-training:
-  learning_rate: 5e-5
-  num_epochs: 3
-  beta: 0.1
-  lambda_kl: 0.1
-  lambda_l2: 0.01
-  
-inference:
-  default_alpha: 1.0
-  temperature: 0.7
-  max_length: 128
+# Strong alignment
+response_strong = model.generate(prompt, alpha=1.5)
 ```
 
 ## Alpha Parameter Guide
 
+The α parameter controls the strength of alignment at inference time:
+
 - `α = 0.0`: Raw base model (no alignment)
 - `α = 0.5`: Light alignment
-- `α = 1.0`: Standard alignment (default)
+- `α = 1.0`: Standard alignment (training default)
 - `α = 1.5`: Strong alignment
 - `α = 2.0`: Maximum alignment
 
-## Loss Components
+## Multi-GPU Training
 
-The training objective combines three components:
+The training script automatically detects and uses available GPUs:
 
-1. **Preference Loss** (L_pref): DPO-style loss for learning preferences
-2. **KL Regularization** (L_KL): Preserves base model knowledge
-3. **L2 Regularization** (L_L2): Prevents alignment vector explosion
+```bash
+# Uses all available GPUs with accelerate
+./train.sh
 
-Total loss: `L_IAV = L_pref + λ_KL * L_KL + λ_L2 * L_L2`
+# Or manually specify GPUs
+CUDA_VISIBLE_DEVICES=0,1 ./train.sh
+```
+
+## Evaluation
+
+Generate responses for evaluation:
+
+```bash
+cd ../evaluation
+python scripts/generate_iav.py 300 --dataset hh-rlhf
+python scripts/generate_iav.py 300 --dataset alpaca_eval
+python scripts/generate_iav.py 300 --dataset arena_hard
+```
+
+## Troubleshooting
+
+### Out of Memory (OOM)
+
+1. **Enable gradient checkpointing**: Add `--gradient_checkpointing`
+2. **Reduce batch size**: Use `--batch_size 2` or `--batch_size 1`
+3. **Use gradient accumulation**: Set `--grad_accum 4`
+4. **Ensure cache is used**: Check that `--cache_file` points to valid cache
+
+### Slow Training
+
+1. **Generate cache first**: Run `./cache.sh` before training
+2. **Check cache is loaded**: Look for "Using cached reference logits" in logs
+3. **Use multiple GPUs**: Training automatically uses all available GPUs
+
+### Cache Issues
+
+If you see "Cache file uses old single-cache format" error:
+- Regenerate cache with dual format using `./cache.sh`
+- The new cache includes both chosen and rejected reference logits
+
+## Key Parameters
+
+- `--beta`: Weight for preference loss term (default: 0.1)
+- `--lambda_kl`: Weight for KL regularization (default: 0.1)  
+- `--lambda_l2`: Weight for L2 regularization on alignment vectors (default: 0.01)
+- `--save_steps`: Checkpoint saving frequency (default: 500)
+- `--eval_steps`: Validation frequency (default: 100)
 
 ## Performance
 
-- **Alignment Performance**: Within 1-2% of GenARM on AlpacaEval and Arena-Hard
-- **Efficiency**: ~50% reduction in memory and latency vs GenARM
-- **Controllability**: Dynamic alignment strength adjustment at inference
-
-## Citation
-
-If you use this implementation, please cite:
-
-```bibtex
-@article{iav2024,
-  title={Inherent Alignment Vectors: Efficient Test-Time Alignment via Knowledge-Value Decoupling},
-  author={Anonymous},
-  year={2024}
-}
-```
+- **Training Speed**: ~3 seconds/iteration with cache, ~12s without
+- **Memory Usage**: ~40GB for 7B model with batch_size=4
+- **Alignment Quality**: Competitive with GenARM and DPO
+- **Inference Speed**: 2x faster than GenARM (single forward pass)
 
 ## License
 
