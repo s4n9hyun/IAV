@@ -65,17 +65,41 @@ class PreferenceDataset(Dataset):
 
 class HHRLHFDataset:
     @staticmethod
-    def load_data(split: str = "train", sample_size: Optional[int] = None) -> List[Dict]:
-        dataset = load_dataset("Anthropic/hh-rlhf", split=split)
+    def load_data(split: str = "train", sample_size: Optional[int] = None, val_ratio: Optional[float] = None) -> List[Dict]:
+        """
+        Load HH-RLHF dataset with optional train/validation split.
+        
+        Args:
+            split: "train" or "test"
+            sample_size: Max samples to load
+            val_ratio: If set, splits train set (e.g., 0.1 = use last 10% as validation)
+        """
+        dataset = load_dataset("Dahoas/full-hh-rlhf", split=split)
         
         processed_data = []
         for item in dataset:
+            # Dahoas format: prompt + chosen/rejected (needs concatenation)
+            full_chosen = item["prompt"] + item["chosen"]
+            full_rejected = item["prompt"] + item["rejected"]
+            
             processed_item = {
-                "prompt": "",
-                "chosen": item["chosen"],
-                "rejected": item["rejected"]
+                "prompt": item["prompt"],
+                "chosen": full_chosen,
+                "rejected": full_rejected
             }
             processed_data.append(processed_item)
+        
+        # Split train set if val_ratio specified
+        if split == "train" and val_ratio is not None:
+            n_total = len(processed_data)
+            if val_ratio < 0.5:  # Return validation portion
+                n_train = int(n_total * 0.9)  # Fixed: use 90% for training
+                processed_data = processed_data[n_train:]  # Take remainder for validation
+                logger.info(f"Validation: {len(processed_data)} samples (10% of train)")
+            else:  # Return training portion (90%)
+                n_train = int(n_total * val_ratio)
+                processed_data = processed_data[:n_train]
+                logger.info(f"Training: {len(processed_data)} samples ({val_ratio*100:.0f}% of train)")
         
         if sample_size and sample_size < len(processed_data):
             processed_data = random.sample(processed_data, sample_size)

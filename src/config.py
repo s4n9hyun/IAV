@@ -239,7 +239,7 @@ BENCHMARK_CONFIGS = {
         "evaluator": "gpt-4"
     },
     "hh_rlhf": {
-        "dataset": "Anthropic/hh-rlhf",
+        "dataset": "Dahoas/full-hh-rlhf",
         "split": "test",
         "metric": "reward_score",
         "evaluator": "reward_model"

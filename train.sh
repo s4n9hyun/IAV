@@ -1,36 +1,39 @@
 #!/bin/bash
 
-# Multi-GPU training script for IAV using accelerate
-# Usage: ./train.sh [any python arguments]
-# Example: ./train.sh --save_steps 250 --eval_steps 100
-# Example: ./train.sh --model_name_or_path custom-model --save_steps 500
+# Train IAV model with parameter-based naming (following GenARM convention)
 
-echo "Starting IAV training with accelerate..."
+MODEL_NAME="argsearch/llama-7b-sft-float32"
+OUTPUT_DIR="./outputs"
+CACHE_FILE="cache.pkl"
 
-# Detect number of GPUs
-NUM_GPUS=$(nvidia-smi -L | wc -l)
-echo "Detected $NUM_GPUS GPU(s)"
+# Hyperparameters (modify these for different experiments)
+BETA=${BETA:-0.1}
+LAMBDA_KL=${LAMBDA_KL:-0.05}
+LAMBDA_L2=${LAMBDA_L2:-0.005}
+LR=${LR:-5e-6}
 
-if [ "$NUM_GPUS" -gt 1 ]; then
-    echo "Using multi-GPU training with accelerate"
-    
-    # Set reasonable defaults for checkpointing (can be overridden by command line args)
-    # With grad_accum=1, global_step increments every batch
-    # save_steps=50 means checkpoint every 50 batches (~2.5 min at 3s/batch)
-    accelerate launch \
-        --config_file accelerate_config.yaml \
-        src/training/train_main.py \
-        --bf16 \
-        --cache_file cache_argsearch_llama-7b-sft-float32_seq1024.pkl \
-        --save_steps 1000 \
-        --eval_steps 500 \
-        "$@"
-else
-    echo "Only 1 GPU detected, falling back to single GPU training"
-    CUDA_VISIBLE_DEVICES=0 python src/training/train_main.py \
-        --bf16 \
-        --cache_file cache_argsearch_llama-7b-sft-float32_seq1024.pkl \
-        --save_steps 100 \
-        --eval_steps 200 \
-        "$@"
-fi
+echo "Beta: $BETA, Lambda_KL: $LAMBDA_KL, Lambda_L2: $LAMBDA_L2, LR: $LR"
+
+# Use single GPU to avoid NCCL timeout issues
+CUDA_VISIBLE_DEVICES=0 accelerate launch --num_processes=1 \
+    src/training/train_main.py \
+    --model_name $MODEL_NAME \
+    --output_dir $OUTPUT_DIR \
+    --use_param_naming \
+    --num_train_epochs 1 \
+    --per_device_train_batch_size 16 \
+    --gradient_accumulation_steps 1\
+    --learning_rate $LR \
+    --warmup_steps 100 \
+    --save_steps 2000 \
+    --eval_steps 999999 \
+    --max_prompt_length 512 \
+    --max_length 1024 \
+    --beta $BETA \
+    --lambda_kl $LAMBDA_KL \
+    --lambda_l2 $LAMBDA_L2 \
+    --bf16 \
+    --cache_file $CACHE_FILE \
+    --resume_from_checkpoint True
+
+echo "IAV training complete."

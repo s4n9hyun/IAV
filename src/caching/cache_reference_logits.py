@@ -112,7 +112,8 @@ if __name__ == "__main__":
     parser.add_argument("--cache_file", default="reference_logits_cache.pkl")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--max_samples", type=int, help="Limit cache to N samples for testing")
-    parser.add_argument("--split", default="train", choices=["train", "test"], help="Dataset split to cache")
+    parser.add_argument("--split", default="train", choices=["train", "test"], 
+                        help="Dataset split to cache")
     
     args = parser.parse_args()
     

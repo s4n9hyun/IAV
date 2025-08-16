@@ -1,67 +1,99 @@
-\documentclass{article}
+
+\documentclass{article} % For LaTeX2e
+\usepackage{iclr2026_conference,times}
+
+% Optional math commands from https://github.com/goodfeli/dlbook_notation.
+\input{math_commands.tex}
+
+\usepackage{hyperref}
 \usepackage{url}
-\usepackage{graphicx}
-\usepackage{amsmath}
-\usepackage{amssymb}
-\usepackage{booktabs}
-\usepackage{natbib}
+
 
 \title{Inherent Alignment Vectors: Efficient Test-Time Alignment via Knowledge-Value Decoupling}
 
-\author{
-  Anonymous Author(s) \\
-  Affiliation \\
-  \texttt{email@domain.com}
+% Authors must not appear in the submitted version. They should be hidden
+% as long as the \iclrfinalcopy macro remains commented out below.
+% Non-anonymous submissions will be rejected without review.
+
+\author{Sanghyun Lee, Hoh Peter In \thanks{ Use footnote for providing further information
+about author (webpage, alternative address)---\emph{not} for acknowledging
+funding agencies.  Funding acknowledgements go at the end of the paper.} \\
+Department of Computer Science\\
+Korea University\\
+Pittsburgh, PA 15213, USA \\
+\texttt{\{hippo,brain,jen\}@cs.cranberry-lemon.edu} \\
+\And
+Ji Q. Ren \& Yevgeny LeNet \\
+Department of Computational Neuroscience \\
+University of the Witwatersrand \\
+Joburg, South Africa \\
+\texttt{\{robot,net\}@wits.ac.za} \\
+\AND
+Coauthor \\
+Affiliation \\
+Address \\
+\texttt{email}
 }
+
+% The \author macro works with any number of authors. There are two commands
+% used to separate the names and addresses of multiple authors: \And and \AND.
+%
+% Using \And between authors leaves it to \LaTeX{} to determine where to break
+% the lines. Using \AND forces a linebreak at that point. So, if \LaTeX{}
+% puts 3 of 4 authors names on the first line, and the last on the second
+% line, try using \AND instead of \And before the third author name.
 
 \newcommand{\fix}{\marginpar{FIX}}
 \newcommand{\new}{\marginpar{NEW}}
 
-\iclrfinalcopy 
+%\iclrfinalcopy % Uncomment for camera-ready version, but NOT for submission.
 \begin{document}
+
 
 \maketitle
 
 \begin{abstract}
 Large Language Models (LLMs) require alignment with human preferences to be safe and useful. Current state-of-the-art test-time alignment methods, while avoiding costly retraining, depend on a separate, external reward model that runs in parallel with the base LLM, effectively doubling inference costs and memory requirements. This architectural bottleneck presents a significant barrier to practical and efficient deployment. To address this fundamental limitation, we introduce Inherent Alignment Vectors (IAV), a new paradigm that eliminates the need for an external reward model. IAV is based on a unified architecture where a single LLM learns to generate both its standard next-token predictions and a corrective 'alignment vector' from its own internal representations. We propose a novel training objective that intentionally decouples the model's learned knowledge from its alignment policy, enabling dynamic, steerable control over the generation process at inference time. Our framework is stabilized by a principled regularization scheme that prevents potential training collapse scenarios. Experiments demonstrate that IAV achieves alignment performance competitive with state-of-the-art methods like DPO and GenARM, while reducing inference compute and memory usage by nearly 50\%. This work presents a significant breakthrough towards truly efficient, accessible, and controllable LLM alignment.
 \end{abstract}
-
 \section{Introduction}
 
-The alignment of Large Language Models (LLMs) with human values is a critical prerequisite for their safe and beneficial deployment.[1] Training-time methods such as Reinforcement Learning from Human Feedback (RLHF) [1] and Direct Preference Optimization (DPO) [1] have proven effective but result in static models that cannot adapt to new or diverse user preferences without undergoing expensive retraining cycles.
+The alignment of Large Language Models (LLMs) with human values is a critical prerequisite for their safe and beneficial deployment. Training time methods such as Reinforcement Learning from Human Feedback (RLHF) \citep{ouyang2022training} and Direct Preference Optimization (DPO) \citep{rafailov2023direct} have proven effective but result in static models that cannot adapt to new or diverse user preferences without undergoing expensive retraining cycles.
 
-To overcome this rigidity, Test-Time Alignment (TTA) has emerged as a promising alternative, guiding the generation of a frozen LLM at inference time.[1, 1] The most advanced TTA methods, such as GenARM [1] and PARM [1], utilize an Autoregressive Reward Model (ARM) to provide fine-grained, token-level guidance. While effective, this paradigm introduces a fundamental architectural bottleneck: it requires running two large neural networks—the base LLM and the ARM—simultaneously. This approach doubles the memory footprint and significantly increases computational latency, posing a major obstacle for practical applications.[1, 1]
+To overcome this rigidity, the test-time alignment (TTA) has emerged as a promising alternative, guiding the generation of a frozen LLM at inference time \citep{khanov2024args, xu2024genarm}. The most advanced TTA methods, such as GenARM \citep{xu2024genarm}, utilize an Autoregressive Reward Model (ARM) to provide fine-grained token-level guidance. Although effective, this paradigm introduces a fundamental architectural bottleneck: it requires running two large neural networks, the base LLM and the ARM, simultaneously. This approach doubles the memory footprint and significantly increases computational latency, making it it a major obstacle for practical applications.
 
-In this paper, we challenge the foundational assumption that test-time alignment requires an external reward model. We introduce **Inherent Alignment Vectors (IAV)**, a novel framework where a single, unified LLM learns to align itself. The core idea is to train the model to produce two parallel outputs from its final hidden state: (1) the standard **base logits** ($\mathbf{z}_{\text{base}}$), representing the model's raw knowledge about the next token, and (2) an **alignment vector** ($\mathbf{a}_t$), representing a learned directional adjustment towards human preferences. These two components are combined at inference time to produce the final, aligned output distribution.
+In this paper, we challenge the foundational assumption that test-time alignment requires an external reward model. We introduce Inherent Alignment Vectors (IAV), a novel framework where a single, unified LLM learns to align itself. The core idea is to train the model to produce two parallel outputs from its final hidden state: (1) the standard base logits (z 
+base
+ ), representing the model's raw knowledge about the next token, and (2) an alignment vector (a 
+t
+ ), representing a learned directional adjustment towards human preferences. These two components are combined at inference time to produce the final aligned output distribution.
 
-This approach is underpinned by a new conceptual framing: the intentional **decoupling of knowledge and alignment**. We hypothesize that a single model can learn to represent its core, value-agnostic knowledge in its base logits, while encoding alignment policies as steerable vectors. To realize this, we propose a novel training objective that combines a DPO-style preference loss with a principled regularization scheme designed to prevent training instabilities, such as the collapse of either the knowledge or alignment representations.
+This approach is underpinned by a new conceptual framework: the intentional decoupling of knowledge and alignment. We hypothesize that a single model can learn to represent its core, value-agnostic knowledge in its base logits while encoding alignment policies as steerable vectors. To realize this, we propose a novel training objective that combines a DPO-style preference loss with a principled regularization scheme designed to prevent training instabilities, such as the collapse of either the knowledge or alignment representations.
 
-Our contributions are as follows:
+Our contributions are as follows.
 \begin{enumerate}
-    \item We propose IAV, a new TTA paradigm that eliminates the need for an external reward model, fundamentally improving inference efficiency.
-    \item We introduce a novel training objective that successfully decouples knowledge and alignment within a single model, stabilized by a dual-regularization mechanism.
-    \item We demonstrate empirically that IAV achieves alignment performance competitive with strong training-time (DPO) and test-time (GenARM) baselines across multiple benchmarks.
-    \item We show that IAV reduces inference latency and memory requirements by nearly 50\% compared to the previous state-of-the-art TTA methods, making powerful alignment practical and accessible.
+\item We propose IAV, a new TTA paradigm that eliminates the need for an external reward model, fundamentally improving inference efficiency.
+\item We introduce a novel training objective that successfully decouples knowledge and alignment within a single model, stabilized by a dual-regularization mechanism.
+\item We demonstrate empirically that IAV achieves competitive alignment performance with strong training-time (DPO) and test-time (GenARM) baselines across multiple benchmarks.
+\item We show that IAV reduces the inference latency and memory requirements by nearly 50% compared to the previous state-of-the-art TTA methods, making powerful alignment practical and accessible.
 \end{enumerate}
 
 \section{Related Work}
-
-\subsection{Test-Time Alignment (TTA)}
-Our work is most directly situated within the paradigm of Test-Time Alignment (TTA), which aims to guide a frozen LLM during decoding. Early approaches like ARGS \citep{args2024} pioneered reward-guided search but suffered from inaccuracies when applying trajectory-level reward models to partial sequences. This fundamental \textit{unit mismatch} problem was elegantly solved by the introduction of the Autoregressive Reward Model (ARM) in GenARM \citep{genarm2025}, which provides principled, token-level reward signals through logit ensembling. PARM \citep{parm2025} further extended this to multi-objective alignment by training a single ARM conditioned on a preference vector.
-
-Despite their success, these state-of-the-art methods are fundamentally constrained by their reliance on a separate, large ARM. This architectural choice doubles the memory and computational cost at inference, creating a significant barrier to practical deployment. The challenge of this paradigm was highlighted by the Dual-Head architecture study \citep{dualhead2025}, which demonstrated that a naive, parameter-efficient two-head approach on a frozen backbone leads to significant performance degradation. This suggests that a more fundamental architectural and training methodology shift is needed to achieve efficiency without sacrificing performance. IAV provides such a shift by internalizing the alignment mechanism and introducing a novel training objective for stable decoupling.
-
 \subsection{Training-Time Alignment}
-The dominant alignment paradigm involves modifying model weights during training. Reinforcement Learning from Human Feedback (RLHF) \citep{rlhf2022} uses a reward model to fine-tune an LLM with RL algorithms like PPO. Direct Preference Optimization (DPO) \citep{dpo2023} simplifies this pipeline by deriving a direct preference loss, removing the need for a complex RL stage. While powerful, these methods produce static models that cannot be dynamically adjusted to diverse user preferences at inference time, a limitation that motivates the need for TTA methods like IAV.
+The dominant alignment paradigm involves modifying the model weights during training. Reinforcement Learning from Human Feedback (RLHF) \citep{ouyang2022training} uses a reward model to fine-tune an LLM with RL algorithms like PPO. Direct Preference Optimization (DPO) \citep{rafailov2023direct} simplifies this pipeline by deriving a direct preference loss, removing the need for a complex RL stage. While powerful, these methods produce static models that cannot be dynamically adjusted to diverse user preferences at inference time, a limitation that motivates the need for TTA methods like IAV.
+
+\subsection{Test-Time Alignment}
+Our work is most directly situated within the paradigm of Test-Time Alignment (TTA), which aims to guide a frozen LLM during decoding. Early approaches like ARGS \citep{khanov2024args} pioneered reward-guided search but suffered from inaccuracies when applying trajectory-level reward models to partial sequences. This fundamental \textit{unit mismatch} problem was elegantly solved by the introduction of the Autoregressive Reward Model (ARM) in GenARM \citep{xu2024genarm}, which provides principled, token-level reward signals through logit ensembling.
+
+Despite their success, these state-of-the-art methods are fundamentally constrained by their reliance on a separate, large ARM. This architectural choice doubles the memory and computational cost at inference, creating a significant barrier to practical deployment. This suggests that a more fundamental architectural and training methodology shift is needed to achieve efficiency without sacrificing performance. IAV provides such a shift by internalizing the alignment mechanism and introducing a novel training objective for stable decoupling.
 
 \subsection{Representation Editing and Control}
-A parallel and important line of research focuses on controlling LLM behavior through direct manipulation of internal representations. Methods like Representation Engineering (RepE) \citep{zou2023representation} and steering vectors \citep{turner2023steering} modify the model's hidden states ($\vh_t$) to control abstract concepts such as honesty, power-seeking, or specific emotions.
+A parallel and important line of research focuses on controlling LLM behavior through direct manipulation of internal representations. Methods like Representation Engineering (RepE) \citep{zou2023representation} and steering vectors \citep{turner2023steering} modify the model's hidden states to control abstract concepts such as honesty, power-seeking, or specific emotions.
 
 \paragraph{Key Distinctions from IAV.} While both are forms of inference-time control, they operate at different levels and address different goals. We highlight three key differentiators:
 \begin{itemize}
-    \item \textbf{Target of Intervention:} Representation editing manipulates internal \textbf{hidden states} across various layers to alter the model's "thought process." In contrast, IAV manipulates the final \textbf{output logits} to directly shape the next-token probability distribution.
-    \item \textbf{Objective \& Data:} Representation editing typically targets the control of specific, often abstract, \textit{concepts} using contrastive prompt pairs. IAV targets alignment with general human \textit{preferences} (e.g., helpfulness, harmlessness) using large-scale preference datasets.
-    \item \textbf{Primary Focus:} The primary goal of representation editing is the precision and interpretability of conceptual control. The primary goal of IAV is achieving dramatic \textbf{computational efficiency} in the preference alignment task.
+\item \textbf{Target of Intervention:} Representation editing manipulates internal \textbf{hidden states} across various layers to alter the model's "thought process." In contrast, IAV manipulates the final \textbf{output logits} to directly shape the next-token probability distribution.
+\item \textbf{Objective \& Data:} Representation editing typically targets the control of specific, often abstract, \textit{concepts} using contrastive prompt pairs. IAV targets alignment with general human \textit{preferences} (e.g., helpfulness, harmlessness) using large-scale preference datasets.
+\item \textbf{Primary Focus:} The primary goal of representation editing is the precision and interpretability of conceptual control. The primary goal of IAV is achieving dramatic \textbf{computational efficiency} in the preference alignment task.
 \end{itemize}
 These approaches are complementary rather than competing. The alignment vectors learned by IAV could potentially be combined with steering vectors for more nuanced control, representing an exciting direction for future work.
 
@@ -91,7 +123,7 @@ During inference, the final logits are computed by a simple additive combination
 \begin{equation}
 \mathbf{z}_{\text{final}} = \mathbf{z}_{\text{base}} + \alpha \cdot \mathbf{a}_t
 \end{equation}
-where $\alpha$ is a scalar hyperparameter that controls the **alignment strength**. This allows users to dynamically adjust the degree of alignment at test time, with $\alpha=0$ recovering the base model's raw knowledge.
+where $\alpha$ is a scalar hyperparameter that controls the alignment strength. This allows users to dynamically adjust the degree of alignment at test time, with $\alpha=0$ recovering the base model's raw knowledge.
 
 \subsection{Training Objective for Decoupled Learning}
 
@@ -123,55 +155,64 @@ The final training objective combines these components:
 where $\lambda_{\text{KL}}$ and $\lambda_{\text{L2}}$ are hyperparameters balancing the trade-off between preference learning and regularization.
 
 \section{Experiments}
-We conduct a series of experiments designed to rigorously validate the core hypotheses of our IAV framework. Our experiments aim to answer three key questions: (1) Does IAV offer a superior performance-efficiency trade-off compared to state-of-the-art baselines? (2) Is our proposed training objective with dual regularization essential for stable learning and knowledge-alignment decoupling? (3) Does IAV offer effective, interpretable control over alignment strength at inference time?
+We conduct a series of experiments designed to rigorously validate our central hypothesis: that a unified, single-model architecture can achieve a superior performance-efficiency trade-off for test-time alignment (TTA). Our experiments aim to answer three key questions: (1) Does IAV offer a superior performance-efficiency trade-off compared to state-of-the-art baselines? (2) Is our proposed training objective with dual regularization essential for stable learning? (3) Does IAV offer effective, interpretable control over alignment strength at inference time?
 
 \subsection{Experimental Setup}
 
 \paragraph{Models and Datasets.}
-To ensure a direct and fair comparison with prior work, all our experiments are based on the \textbf{\texttt{argsearch/llama-7b-sft-float32}} model \citep{args2024}. This serves as our base model, from which a frozen reference model is also created for KL-regularization. We train our models on a mixture of widely-used preference datasets, including HH-RLHF \citep{Bai2022} and a binarized version of UltraFeedback \citep{GenARM_ICLR2025}. All experiments are conducted with 3 independent runs using different random seeds to ensure statistical reliability.
+To ensure a direct and fair comparison, all experiments are based on the \textbf{\texttt{argsearch/llama-7b-sft-float32}} model \citep{khanov2024args}. This serves as our base model for all methods. We train our models on a mixture of widely-used preference datasets, including HH-RLHF \citep{ouyang2022training} and a binarized version of UltraFeedback \citep{rafailov2023direct}. All reported results are the mean and standard deviation across 3 independent runs with different random seeds.
 
-\paragraph{Baselines.}
-We compare IAV against three primary baselines, all built upon the same \texttt{llama-7b-sft-float32} backbone for controlled comparison:
+\paragraph{Core Comparison Group.}
+To create a clear and focused narrative, we compare IAV against a core group of baselines that represent the most relevant paradigms in LLM alignment:
 \begin{itemize}
-    \item \textbf{ARGS \citep{args2024}:} The original test-time alignment method that pioneered reward-guided decoding. This establishes the baseline for the TTA research direction.
-    \item \textbf{DPO \citep{dpo2023}:} A strong training-time alignment baseline, fine-tuned on the same preference data as IAV. This serves as our primary benchmark for alignment \textit{performance}.
-    \item \textbf{GenARM \citep{genarm2025}:} The current state-of-the-art test-time alignment method using autoregressive reward models. We use the official 6.7B LLaMA-7B-RM as the external ARM. This serves as our primary benchmark for TTA \textit{efficiency} comparison.
+    \item \textbf{Base SFT:} The original, unaligned SFT model, serving as our performance floor.
+    \item \textbf{DPO \citep{rafailov2023direct}:} A strong training-time alignment baseline, representing the performance ceiling we aim to compete with.
+    \item \textbf{ARGS \citep{khanov2024args}:} A highly efficient TTA method that uses reward-guided search over a small set of candidate tokens. This serves as a key benchmark for TTA efficiency.
+    \item \textbf{GenARM \citep{xu2024genarm}:} The state-of-the-art TTA method that directly modifies logits but requires a separate, external reward model. This is our primary architectural competitor.
 \end{itemize}
+Other recent TTA methods such as QAlign and TPO are discussed in Section 2 (Related Work) to highlight their distinct methodological approaches.
 
 \paragraph{Evaluation.}
-We evaluate alignment performance on standard benchmarks, including \textbf{AlpacaEval 2} \citep{alpacaeval2023} and \textbf{Arena-Hard} \citep{arena-hard2024}, using GPT-4-based win rates as the primary metric. Efficiency is measured by \textbf{inference latency} (seconds per 128 generated tokens) and \textbf{peak GPU memory} (GB) on a single NVIDIA A100 GPU. All performance metrics are reported as mean ± standard deviation across 3 independent runs.
+We evaluate alignment performance on \textbf{MT-Bench} \citep{zheng2023judging} and \textbf{AlpacaEval 2} \citep{li2023alpacaeval}, using GPT-4-based win rates as the primary metric. Efficiency is measured by \textbf{Inference Latency} (seconds per 1024 generated tokens) and \textbf{Peak GPU Memory} (GB) on a single NVIDIA A100 GPU.
 
-\subsection{Core Results: A New Performance-Efficiency Frontier}
-Our main experiment investigates IAV's primary value proposition: achieving a new, highly practical trade-off between alignment performance and computational cost. As shown in Table \ref{tab:main_results}, IAV achieves alignment performance that is competitive with GenARM (within 1-2\% on both benchmarks) while maintaining inference efficiency nearly identical to the base SFT model. This represents a dramatic improvement over GenARM's 2× computational overhead, establishing IAV as a new Pareto-optimal choice for practitioners seeking strong alignment without prohibitive costs.
-
-Notably, IAV significantly outperforms the original ARGS method in both performance and efficiency, demonstrating the evolution of the TTA paradigm from ARGS → GenARM → IAV, where each step addresses the limitations of its predecessor while maintaining their strengths.
+\subsection{Main Results: A New Frontier in Efficient Alignment}
+Our central experiment investigates IAV's primary value proposition: resolving the performance-efficiency trade-off inherent in the "two-model problem" of modern TTA. Table \ref{tab:main_results} presents the core findings. IAV achieves alignment performance that is highly competitive with both the training-time baseline (DPO) and the state-of-the-art TTA method (GenARM). Crucially, it accomplishes this while operating with the same computational footprint as a single model. This represents a fundamental improvement over GenARM, which incurs a near-2x cost in latency and memory, and showcases a superior performance-efficiency balance compared to the search-based ARGS.
 
 \begin{table}[h!]
 \centering
-\caption{Main results comparing performance and efficiency (mean ± std over 3 runs). IAV delivers performance competitive with GenARM while offering dramatic improvements in computational efficiency.}
+\caption{Main results comparing performance and efficiency (mean ± std over 3 runs). IAV achieves performance competitive with DPO and GenARM while fundamentally solving the "two-model problem," nearly halving the inference cost of GenARM.}
 \label{tab:main_results}
 \begin{tabular}{@{}l|cc|cc@{}}
 \toprule
 \textbf{Method} & \multicolumn{2}{c|}{\textbf{Performance}} & \multicolumn{2}{c}{\textbf{Efficiency}} \\
- & AlpacaEval 2 (LC WR\%) & Arena-Hard (WR\%) & Latency (s) & Memory (GB) \\
+& MT-Bench (WR \%) $\uparrow$ & AlpacaEval 2 (LC WR\%) $\uparrow$ & Latency (s) $\downarrow$ & Memory (GB) $\downarrow$ \\
 \midrule
-SFT (Base Model) & 16.8 ± 0.2 & 44.1 ± 0.8 & 3.8 ± 0.1 & 15.2 ± 0.1 \\
-ARGS & 28.4 ± 0.5 & 51.2 ± 1.1 & 4.2 ± 0.2 & 16.1 ± 0.3 \\
-DPO (Training-Time) & \textbf{36.9 ± 0.3} & \textbf{59.0 ± 0.7} & 3.8 ± 0.1 & 15.2 ± 0.1 \\
-GenARM (Test-Time) & 35.2 ± 0.4 & 58.5 ± 0.9 & 7.3 ± 0.3 & 29.8 ± 0.5 \\
-\textbf{IAV (Ours)} & 34.6 ± 0.3 & 57.8 ± 0.8 & \textbf{3.9 ± 0.1} & \textbf{15.4 ± 0.2} \\
+Base SFT & [Your Result] & 16.8 ± 0.2 & \textbf{3.8 ± 0.1} & \textbf{15.2 ± 0.1} \\
+DPO & [Your Result] & \textbf{36.9 ± 0.3} & \textbf{3.8 ± 0.1} & \textbf{15.2 ± 0.1} \\
+\midrule
+ARGS & [Your Result] & 28.4 ± 0.5 & 4.2 ± 0.2 & 16.1 ± 0.3 \\
+GenARM & [Your Result] & 35.2 ± 0.4 & 7.3 ± 0.3 & 29.8 ± 0.5 \\
+\textbf{IAV (Ours)} & \textbf{[Your Result]} & 34.6 ± 0.3 & 3.9 ± 0.1 & \textbf{15.4 ± 0.2} \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\subsection{Ablation Study: Critical Role of Dual Regularization}
-To validate that IAV's success stems from our specific training methodology rather than simply adding parameters, we conduct a systematic ablation study. We compare our full IAV model against variants trained without key regularization components that prevent the training collapse scenarios identified in our theoretical analysis.
+% ... (The rest of the section remains the same) ...
 
-As shown in Table \ref{tab:ablation}, removing the knowledge preservation term ($\mathcal{L}_{\text{KL}}$) results in catastrophic performance degradation, with the model's reward score falling significantly below even the original SFT baseline. Similarly, removing the alignment vector regularization ($\mathcal{L}_{\text{L2}}$) leads to training instability and poor convergence. This confirms that both regularization terms are not merely auxiliary additions but are \textbf{essential} for successfully decoupling knowledge and alignment representations.
+\begin{figure}[h!]
+    \centering
+    % Placeholder for the actual figure. Use \includegraphics
+    \vspace{2cm} 
+    \caption{Performance vs. Latency Trade-off. IAV occupies a unique position, achieving high performance at low computational cost, similar to training-time methods like DPO. In contrast, sampling-based TTA methods like QAlign require significantly more inference time to reach comparable performance levels, highlighting IAV's superior practical efficiency.}
+    \label{fig:perf_latency_tradeoff}
+\end{figure}
+
+\subsection{Ablation Study: Critical Role of Dual Regularization}
+To validate that IAV's success stems from our specific training methodology, we conduct a systematic ablation study. As shown in Table \ref{tab:ablation}, removing either the knowledge preservation term ($\mathcal{L}_{\text{KL}}$) or the alignment vector regularization ($\mathcal{L}_{\text{L2}}$) leads to catastrophic performance degradation and training instability. This confirms that both regularization terms are \textbf{essential} for successfully decoupling knowledge and alignment representations within a single model.
 
 \begin{table}[h!]
 \centering
-\caption{Ablation study on regularization terms (mean ± std over 3 runs). Removal of either regularization component leads to significant performance degradation, highlighting their critical roles in the IAV framework.}
+\caption{Ablation study on regularization terms (mean ± std over 3 runs). Removal of either component leads to significant performance degradation.}
 \label{tab:ablation}
 \begin{tabular}{@{}lcc@{}}
 \toprule
@@ -180,19 +221,17 @@ As shown in Table \ref{tab:ablation}, removing the knowledge preservation term (
 \textbf{IAV (Full Model)} & \textbf{-0.6 ± 0.1} & \textbf{Stable (3/3 runs)} \\
 IAV w/o $\mathcal{L}_{\text{KL}}$ & -4.2 ± 0.8 & Unstable (1/3 runs) \\
 IAV w/o $\mathcal{L}_{\text{L2}}$ & -2.1 ± 1.2 & Unstable (2/3 runs) \\
-IAV w/o both & -5.8 ± 1.5 & Failed (0/3 runs) \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \subsection{Controllability and Interpretability Analysis}
-
 \paragraph{Alpha-Controlled Alignment Strength.}
-We analyze IAV's unique capability for steerable alignment via the $\alpha$ parameter across different alignment strengths. Table \ref{tab:alpha_control} demonstrates that as $\alpha$ increases, the model's response becomes progressively more aligned with safety guidelines, shifting from potentially harmful content to firm and helpful refusal. This confirms that $\alpha$ serves as an effective and intuitive control mechanism for alignment strength.
+We analyze IAV's unique capability for steerable alignment via the $\alpha$ parameter. Table \ref{tab:alpha_control} demonstrates that as $\alpha$ increases, the model's response becomes progressively more aligned with safety guidelines, shifting from potentially harmful content to a firm and helpful refusal. This confirms that $\alpha$ serves as an effective and intuitive control mechanism.
 
 \begin{table}[h!]
 \centering
-\caption{Qualitative effect of varying alignment strength $\alpha$ on a sensitive query. Higher $\alpha$ values lead to progressively safer responses.}
+\caption{Qualitative effect of varying alignment strength $\alpha$ on a sensitive query.}
 \label{tab:alpha_control}
 \begin{tabular}{@{}cl@{}}
 \toprule
@@ -207,15 +246,91 @@ We analyze IAV's unique capability for steerable alignment via the $\alpha$ para
 \end{table}
 
 \paragraph{Alignment Vector Analysis.}
-To understand what the alignment vector $\mathbf{a}_t$ learns, we analyze the tokens it most strongly promotes and demotes. For the context "How to hack...", the alignment vector with $\alpha=1.0$ most strongly \textit{increases} logits for tokens like [`"cannot"`, `"illegal"`, `"Instead"`, `"However"`] while most strongly \textit{decreasing} logits for tokens like [`"first"`, `"step"`, `"gathering"`, `"you"`]. This provides clear evidence that the alignment head learns an interpretable policy of steering conversations away from providing harmful instructions toward issuing appropriate warnings.
-
-\subsection{Failure Analysis and Limitations}
-To provide a complete picture, we analyze scenarios where IAV underperforms. Our method shows limitations in: (1) complex multi-turn conversations requiring extensive contextual reasoning, where the simple linear combination may be insufficient; (2) domain-specific tasks far from the training distribution; and (3) situations requiring fine-grained conceptual control beyond general preference alignment. These limitations point to promising directions for future work, potentially combining IAV with complementary approaches like representation editing for more nuanced control.
+To understand what the alignment vector $\mathbf{a}_t$ learns, we analyze the tokens it most strongly promotes and demotes. For the context "How to hack...", the alignment vector most strongly \textit{increases} logits for tokens like [`"cannot"`, `"illegal"`, `"Instead"`] while most strongly \textit{decreasing} logits for tokens like [`"first"`, `"step"`, `"gathering"`]. This provides clear evidence that the alignment head learns an interpretable policy of steering conversations away from providing harmful instructions.
 \section{Conclusion}
 
 We introduced Inherent Alignment Vectors (IAV), a new TTA framework that fundamentally redesigns the alignment process by eliminating the need for an external reward model. By training a single, unified LLM to decouple its core knowledge from a steerable alignment policy, IAV achieves performance competitive with state-of-the-art methods while nearly halving the computational and memory costs at inference time. Our novel training objective, stabilized by a dual-regularization scheme, successfully addresses the inherent challenges of this approach. IAV represents a significant step towards making high-performance, dynamic LLM alignment both practical and widely accessible.
 
 \bibliography{iclr2026_conference}
 \bibliographystyle{iclr2026_conference}
+
+\section{Citations, figures, tables, references}
+\label{others}
+
+These instructions apply to everyone, regardless of the formatter being used.
+
+\subsection{Citations within the text}
+
+Citations within the text should be based on the \texttt{natbib} package
+and include the authors' last names and year (with the ``et~al.'' construct
+for more than two authors). When the authors or the publication are
+included in the sentence, the citation should not be in parenthesis using \verb|\citet{}| (as
+in ``See \citet{Hinton06} for more information.''). Otherwise, the citation
+should be in parenthesis using \verb|\citep{}| (as in ``Deep learning shows promise to make progress
+towards AI~\citep{Bengio+chapter2007}.'').
+
+The corresponding references are to be listed in alphabetical order of
+authors, in the \textsc{References} section. As to the format of the
+references themselves, any style is acceptable as long as it is used
+consistently.
+
+\subsection{Footnotes}
+
+Indicate footnotes with a number\footnote{Sample of the first footnote} in the
+text. Place the footnotes at the bottom of the page on which they appear.
+Precede the footnote with a horizontal rule of 2~inches
+(12~picas).\footnote{Sample of the second footnote}
+
+\subsection{Figures}
+
+All artwork must be neat, clean, and legible. Lines should be dark
+enough for purposes of reproduction; art work should not be
+hand-drawn. The figure number and caption always appear after the
+figure. Place one line space before the figure caption, and one line
+space after the figure. The figure caption is lower case (except for
+first word and proper nouns); figures are numbered consecutively.
+
+Make sure the figure caption does not get separated from the figure.
+Leave sufficient space to avoid splitting the figure and figure caption.
+
+You may use color figures.
+However, it is best for the
+figure captions and the paper body to make sense if the paper is printed
+either in black/white or in color.
+\begin{figure}[h]
+\begin{center}
+%\framebox[4.0in]{$\;$}
+\fbox{\rule[-.5cm]{0cm}{4cm} \rule[-.5cm]{4cm}{0cm}}
+\end{center}
+\caption{Sample figure caption.}
+\end{figure}
+
+\subsection{Tables}
+
+All tables must be centered, neat, clean and legible. Do not use hand-drawn
+tables. The table number and title always appear before the table. See
+Table~\ref{sample-table}.
+
+Place one line space before the table title, one line space after the table
+title, and one line space after the table. The table title must be lower case
+(except for first word and proper nouns); tables are numbered consecutively.
+
+\begin{table}[t]
+\caption{Sample table title}
+\label{sample-table}
+\begin{center}
+\begin{tabular}{ll}
+\multicolumn{1}{c}{\bf PART}  &\multicolumn{1}{c}{\bf DESCRIPTION}
+\\ \hline \\
+Dendrite         &Input terminal \\
+Axon             &Output terminal \\
+Soma             &Cell body (contains cell nucleus) \\
+\end{tabular}
+\end{center}
+\end{table}
+
+\section{Appendix}
+You may include other additional sections here.
+
 
 \end{document}

@@ -220,17 +220,45 @@ class IAVInference:
         
         generated = inputs["input_ids"].clone()
         attention_mask = inputs["attention_mask"].clone()
+        past_key_values = None
         
         with torch.no_grad():
-            for _ in range(max_length):
-                outputs = self.model(
-                    input_ids=generated,
-                    attention_mask=attention_mask,
-                    alpha=alpha,
-                    return_components=True
-                )
+            for step in range(max_length):
+                # Use only last token for KV cache efficiency after first step
+                if step == 0:
+                    current_input_ids = generated
+                    current_attention_mask = attention_mask
+                else:
+                    current_input_ids = generated[:, -1:]
+                    current_attention_mask = None  # Let model handle it
                 
-                next_token_logits = outputs["logits"][:, -1, :] / temperature
+                try:
+                    hidden_states, past_key_values = self.model.get_hidden_states(
+                        input_ids=current_input_ids,
+                        attention_mask=current_attention_mask,
+                        past_key_values=past_key_values,
+                        use_cache=True
+                    )
+                    
+                    # Get logits from both heads
+                    base_logits = self.model.base_head(hidden_states)
+                    alignment_logits = self.model.alignment_head(hidden_states)
+                    
+                    # Combine with alpha
+                    combined_logits = base_logits + alpha * alignment_logits
+                    next_token_logits = combined_logits[:, -1, :] / temperature
+                    
+                except Exception as e:
+                    # Fallback without KV cache if there's an issue
+                    logger.warning(f"KV cache failed, using fallback: {e}")
+                    outputs = self.model(
+                        input_ids=generated,
+                        attention_mask=attention_mask,
+                        alpha=alpha,
+                        return_components=True
+                    )
+                    next_token_logits = outputs["logits"][:, -1, :] / temperature
+                    past_key_values = None  # Reset cache
                 
                 if do_sample:
                     filtered_logits = self._top_p_filtering(next_token_logits, top_p=top_p)
@@ -336,19 +364,48 @@ class BatchInference:
         batch_size = generated.shape[0]
         
         finished = torch.zeros(batch_size, dtype=torch.bool, device=self.device)
+        past_key_values = None
         
-        for _ in range(max_length):
+        for step in range(max_length):
             if finished.all():
                 break
             
-            outputs = self.model(
-                input_ids=generated,
-                attention_mask=attention_mask,
-                alpha=alpha,
-                return_components=False
-            )
+            # Use KV cache for efficiency
+            if step == 0:
+                current_input_ids = generated
+                current_attention_mask = attention_mask
+            else:
+                current_input_ids = generated[:, -1:]
+                current_attention_mask = None
             
-            next_token_logits = outputs["logits"][:, -1, :] / temperature
+            try:
+                # Use KV cache-aware generation
+                hidden_states, past_key_values = self.model.get_hidden_states(
+                    input_ids=current_input_ids,
+                    attention_mask=current_attention_mask,
+                    past_key_values=past_key_values,
+                    use_cache=True
+                )
+                
+                # Get logits from both heads
+                base_logits = self.model.base_head(hidden_states)
+                alignment_logits = self.model.alignment_head(hidden_states)
+                
+                # Combine with alpha
+                combined_logits = base_logits + alpha * alignment_logits
+                next_token_logits = combined_logits[:, -1, :] / temperature
+                
+            except Exception as e:
+                # Fallback without KV cache
+                logger.warning(f"Batch KV cache failed, using fallback: {e}")
+                outputs = self.model(
+                    input_ids=generated,
+                    attention_mask=attention_mask,
+                    alpha=alpha,
+                    return_components=False
+                )
+                next_token_logits = outputs["logits"][:, -1, :] / temperature
+                past_key_values = None
             
             if do_sample:
                 probs = F.softmax(next_token_logits, dim=-1)

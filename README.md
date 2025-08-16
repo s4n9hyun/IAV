@@ -67,7 +67,7 @@ Before training, generate a cache of reference model logits to significantly spe
 # Or manually:
 python src/caching/cache_reference_logits.py \
     --model_name argsearch/llama-7b-sft-float32 \
-    --dataset_name Anthropic/hh-rlhf \
+    --dataset_name Dahoas/full-hh-rlhf \
     --split train \
     --max_seq_length 2048 \
     --output_path ./cache/reference_logits_dual_hh_train_2048.pt

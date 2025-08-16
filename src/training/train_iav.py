@@ -73,7 +73,7 @@ class IAVLoss(nn.Module):
             return torch.tensor(0.0, device=base_logits.device)
         
         if cached_ref_logits is not None:
-            # Use cached reference token logits
+            # Use cached reference token logits (CACHE-ONLY mode)
             # base_logits shape: [batch, seq_len, vocab]
             # cached_ref_logits shape: [batch, seq_len] (logits for actual tokens)
             batch_size, seq_len, vocab_size = base_logits.shape
@@ -103,32 +103,9 @@ class IAVLoss(nn.Module):
                       f"ref_token_logits mean={ref_token_logits.mean().item():.6f}, "
                       f"kl_div={kl_div.item():.6f}")
         else:
-            # Use live reference model
-            with torch.no_grad():
-                ref_outputs = self.reference_model(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask
-                )
-                ref_logits = ref_outputs.logits if hasattr(ref_outputs, 'logits') else ref_outputs
-
-            # Unify KL calculation method - use MSE between token logits (same as cached version)
-            batch_size, seq_len, vocab_size = base_logits.shape
-            
-            # Gather base model logits for actual tokens
-            input_ids_expanded = input_ids.unsqueeze(-1)  # [batch, seq_len, 1]
-            base_token_logits = torch.gather(base_logits, dim=2, index=input_ids_expanded).squeeze(-1)  # [batch, seq_len]
-            
-            # Gather reference model logits for actual tokens
-            ref_token_logits = torch.gather(ref_logits, dim=2, index=input_ids_expanded).squeeze(-1)  # [batch, seq_len]
-
-            # Convert to float32 for numerical stability
-            base_token_logits = base_token_logits.float()
-            ref_token_logits = ref_token_logits.float()
-            attention_mask = attention_mask.float()
-            
-            # Compute MSE loss between token logits (unified with cached version)
-            kl_div = F.mse_loss(base_token_logits, ref_token_logits, reduction='none')  # [batch, seq_len]
-            kl_div = (kl_div * attention_mask).sum() / attention_mask.sum()
+            # Cache not available - skip KL regularization instead of using reference model
+            print("WARNING: No cached reference logits available, skipping KL regularization")
+            kl_div = torch.tensor(0.0, device=base_logits.device)
         
         return kl_div
     
@@ -143,11 +120,15 @@ class IAVLoss(nn.Module):
         if attention_mask is not None:
             attention_mask = attention_mask.float()
         
-        l2_norms = alignment_vector.norm(dim=-1)
+        # alignment_vector shape: [batch_size, seq_len, hidden_dim]
+        # Compute L2 norm across hidden dimension
+        l2_norms = alignment_vector.norm(dim=-1)  # [batch_size, seq_len]
         
         if attention_mask is not None:
+            # Mask out padding tokens
             l2_norms = l2_norms * attention_mask
-            l2_reg = l2_norms.sum() / attention_mask.sum()
+            # Average over valid tokens
+            l2_reg = l2_norms.sum() / (attention_mask.sum() + 1e-8)  # Add epsilon for stability
         else:
             l2_reg = l2_norms.mean()
         
@@ -335,12 +316,23 @@ class IAVTrainer:
         if log_wandb:
             wandb.init(project="iav-training")
     
-    def train(self):
+    def train(self, start_epoch=0, start_step=0):
         self.model.train()
-        global_step = 0
+        global_step = start_step
         best_val_loss = float('inf')
         
-        for epoch in range(self.num_epochs):
+        # Print configuration for debugging
+        if not self.accelerator or self.accelerator.is_main_process:
+            print(f"[TRAIN CONFIG] save_steps: {self.save_steps}, eval_steps: {self.eval_steps}")
+            print(f"[TRAIN CONFIG] save_dir: {self.save_dir}")
+            print(f"[TRAIN CONFIG] val_dataloader exists: {self.val_dataloader is not None}")
+        
+        # Calculate steps to skip if resuming mid-epoch
+        steps_per_epoch = len(self.train_dataloader)
+        steps_to_skip = start_step % steps_per_epoch if start_step > 0 else 0
+        
+        # Resume from the correct epoch
+        for epoch in range(start_epoch, self.num_epochs):
             epoch_losses = []
             
             progress_bar = tqdm(
@@ -349,6 +341,9 @@ class IAVTrainer:
             )
             
             for step, batch in enumerate(progress_bar):
+                # Skip already processed batches when resuming
+                if epoch == start_epoch and step < steps_to_skip:
+                    continue
                 # Skip device transfer if using accelerator (already handled)
                 if not self.accelerator:
                     batch = {k: v.to("cuda") for k, v in batch.items()}
@@ -362,19 +357,31 @@ class IAVTrainer:
                     else:
                         print("DEBUG: No reference_token_logits in batch!")
                 
-                model_outputs_chosen = self.model(
-                    input_ids=batch["input_ids_chosen"],
-                    attention_mask=batch["attention_mask_chosen"],
+                # OPTIMIZATION: Batch concatenation - single forward pass instead of two
+                batch_size = batch["input_ids_chosen"].shape[0]
+                
+                # 1. Concatenate chosen and rejected batches
+                concatenated_input_ids = torch.cat([batch["input_ids_chosen"], batch["input_ids_rejected"]], dim=0)
+                concatenated_attention_mask = torch.cat([batch["attention_mask_chosen"], batch["attention_mask_rejected"]], dim=0)
+                
+                # 2. Single forward pass for both chosen and rejected
+                all_model_outputs = self.model(
+                    input_ids=concatenated_input_ids,
+                    attention_mask=concatenated_attention_mask,
                     alpha=1.0,
                     return_components=True
                 )
                 
-                model_outputs_rejected = self.model(
-                    input_ids=batch["input_ids_rejected"],
-                    attention_mask=batch["attention_mask_rejected"],
-                    alpha=1.0,
-                    return_components=True
-                )
+                # 3. Split results back into chosen and rejected
+                model_outputs_chosen = {}
+                model_outputs_rejected = {}
+                for k, v in all_model_outputs.items():
+                    if v is not None and hasattr(v, '__getitem__'):
+                        model_outputs_chosen[k] = v[:batch_size]
+                        model_outputs_rejected[k] = v[batch_size:]
+                    else:
+                        model_outputs_chosen[k] = v
+                        model_outputs_rejected[k] = v
                 
                 loss, loss_components = self.loss_fn(
                     model_outputs_chosen=model_outputs_chosen,
@@ -430,18 +437,34 @@ class IAVTrainer:
                             "global_step": global_step
                         })
                     
-                    # Step-based checkpointing (skip step 0)
+                    # Step-based checkpointing (skip step 0)  
                     if global_step > 0 and global_step % self.save_steps == 0:
-                        self.save_checkpoint(epoch, global_step, best=False)
+                        if not self.accelerator or self.accelerator.is_main_process:
+                            print(f"[CHECKPOINT] Saving at step {global_step}, save_dir: {self.save_dir}")
+                            logger.info(f"Saving checkpoint at step {global_step}")
+                            self.save_checkpoint(epoch, global_step, best=False)
                     
                     # Step-based evaluation (skip step 0)
+                    # Debug: Check evaluation conditions
+                    if global_step > 0 and global_step % self.eval_steps == 0:
+                        if not self.accelerator or self.accelerator.is_main_process:
+                            print(f"[EVAL] Step {global_step}, eval_steps: {self.eval_steps}, val_dataloader: {self.val_dataloader is not None}")
+                    
                     if self.val_dataloader is not None and global_step > 0 and global_step % self.eval_steps == 0:
-                        val_loss = self.validate()
-                        logger.info(f"Step {global_step} - Validation Loss: {val_loss:.4f}")
+                        if not self.accelerator or self.accelerator.is_main_process:
+                            print(f"[EVAL] Starting evaluation at step {global_step}")
+                            logger.info(f"Starting evaluation at step {global_step}")
                         
-                        if val_loss < best_val_loss:
-                            best_val_loss = val_loss
-                            self.save_checkpoint(epoch, global_step, best=True)
+                        # Single GPU: No synchronization needed
+                        val_loss = self.validate()
+                        
+                        # Only log and save on main process
+                        if not self.accelerator or self.accelerator.is_main_process:
+                            logger.info(f"Step {global_step} - Validation Loss: {val_loss:.4f}")
+                            
+                            if val_loss < best_val_loss:
+                                best_val_loss = val_loss
+                                self.save_checkpoint(epoch, global_step, best=True)
             
             avg_epoch_loss = sum(epoch_losses) / len(epoch_losses)
             logger.info(f"Epoch {epoch + 1} - Average Loss: {avg_epoch_loss:.4f}")
@@ -453,45 +476,74 @@ class IAVTrainer:
         self.model.eval()
         val_losses = []
         
+        # Only show progress bar on main process to avoid NCCL issues
+        show_progress = not self.accelerator or self.accelerator.is_main_process
+        
         with torch.no_grad():
-            for batch in tqdm(self.val_dataloader, desc="Validation"):
+            dataloader = tqdm(self.val_dataloader, desc="Validation", disable=not show_progress)
+            for batch in dataloader:
                 # Skip device transfer if using accelerator (already handled)
                 if not self.accelerator:
                     batch = {k: v.to("cuda") for k, v in batch.items()}
                 
-                model_outputs_chosen = self.model(
-                    input_ids=batch["input_ids_chosen"],
-                    attention_mask=batch["attention_mask_chosen"],
-                    alpha=1.0,
-                    return_components=True
-                )
-                
-                model_outputs_rejected = self.model(
-                    input_ids=batch["input_ids_rejected"],
-                    attention_mask=batch["attention_mask_rejected"],
-                    alpha=1.0,
-                    return_components=True
-                )
-                
-                loss, loss_components = self.loss_fn(
-                    model_outputs_chosen=model_outputs_chosen,
-                    model_outputs_rejected=model_outputs_rejected,
-                    labels_chosen=batch["labels_chosen"],
-                    labels_rejected=batch["labels_rejected"],
-                    mask_chosen=batch["attention_mask_chosen"],
-                    mask_rejected=batch["attention_mask_rejected"],
-                    input_ids_chosen=batch["input_ids_chosen"],
-                    attention_mask_chosen=batch["attention_mask_chosen"],
-                    input_ids_rejected=batch["input_ids_rejected"],
-                    attention_mask_rejected=batch["attention_mask_rejected"],
-                    cached_ref_logits_chosen=batch.get("reference_token_logits_chosen"),
-                    cached_ref_logits_rejected=batch.get("reference_token_logits_rejected")
-                )
-                
-                val_losses.append(loss_components["total_loss"])
+                try:
+                    # OPTIMIZATION: Batch concatenation for validation too
+                    batch_size = batch["input_ids_chosen"].shape[0]
+                    
+                    # 1. Concatenate chosen and rejected batches
+                    concatenated_input_ids = torch.cat([batch["input_ids_chosen"], batch["input_ids_rejected"]], dim=0)
+                    concatenated_attention_mask = torch.cat([batch["attention_mask_chosen"], batch["attention_mask_rejected"]], dim=0)
+                    
+                    # 2. Single forward pass for both chosen and rejected
+                    all_model_outputs = self.model(
+                        input_ids=concatenated_input_ids,
+                        attention_mask=concatenated_attention_mask,
+                        alpha=1.0,
+                        return_components=True
+                    )
+                    
+                    # 3. Split results back into chosen and rejected
+                    model_outputs_chosen = {}
+                    model_outputs_rejected = {}
+                    for k, v in all_model_outputs.items():
+                        if v is not None and hasattr(v, '__getitem__'):
+                            model_outputs_chosen[k] = v[:batch_size]
+                            model_outputs_rejected[k] = v[batch_size:]
+                        else:
+                            model_outputs_chosen[k] = v
+                            model_outputs_rejected[k] = v
+                    
+                    loss, loss_components = self.loss_fn(
+                        model_outputs_chosen=model_outputs_chosen,
+                        model_outputs_rejected=model_outputs_rejected,
+                        labels_chosen=batch["labels_chosen"],
+                        labels_rejected=batch["labels_rejected"],
+                        mask_chosen=batch["attention_mask_chosen"],
+                        mask_rejected=batch["attention_mask_rejected"],
+                        input_ids_chosen=batch["input_ids_chosen"],
+                        attention_mask_chosen=batch["attention_mask_chosen"],
+                        input_ids_rejected=batch["input_ids_rejected"],
+                        attention_mask_rejected=batch["attention_mask_rejected"],
+                        cached_ref_logits_chosen=batch.get("reference_token_logits_chosen"),
+                        cached_ref_logits_rejected=batch.get("reference_token_logits_rejected")
+                    )
+                    
+                    val_losses.append(loss_components["total_loss"])
+                except Exception as e:
+                    if show_progress:
+                        logger.warning(f"Validation batch failed: {e}")
+                    continue
         
         self.model.train()
-        return sum(val_losses) / len(val_losses)
+        
+        if len(val_losses) == 0:
+            return float('inf')
+        
+        avg_loss = sum(val_losses) / len(val_losses)
+        
+        # Single GPU: No distributed loss gathering needed
+        
+        return avg_loss
     
     def save_checkpoint(self, epoch: int, global_step: int, best: bool = False):
         # Only save on main process in multi-GPU training
@@ -521,10 +573,12 @@ class IAVTrainer:
         if best:
             path = os.path.join(self.save_dir, "best_model.pt")
             torch.save(checkpoint, path)
+            print(f"[SAVE] Best checkpoint saved to {path}")
             logger.info(f"Best checkpoint saved to {path}")
         else:
             path = os.path.join(self.save_dir, f"checkpoint_step_{global_step}.pt")
             torch.save(checkpoint, path)
+            print(f"[SAVE] Checkpoint saved to {path}")
             logger.info(f"Checkpoint saved to {path}")
             
             # Keep only the 3 most recent checkpoints (excluding best_model.pt)
