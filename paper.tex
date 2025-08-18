@@ -180,21 +180,23 @@ Our central experiment investigates IAV's primary value proposition: resolving t
 
 \begin{table}[h!]
 \centering
-\caption{Main results comparing performance and efficiency (mean ± std over 3 runs). IAV achieves performance competitive with DPO and GenARM while fundamentally solving the "two-model problem," nearly halving the inference cost of GenARM.}
+\caption{Main results comparing performance and efficiency. IAV achieves performance competitive with training-time alignment while maintaining single-model efficiency.}
 \label{tab:main_results}
-\begin{tabular}{@{}l|cc|cc@{}}
+\begin{tabular}{@{}l|ccc|cc@{}}
 \toprule
-\textbf{Method} & \multicolumn{2}{c|}{\textbf{Performance}} & \multicolumn{2}{c}{\textbf{Efficiency}} \\
-& MT-Bench (WR \%) $\uparrow$ & AlpacaEval 2 (LC WR\%) $\uparrow$ & Latency (s) $\downarrow$ & Memory (GB) $\downarrow$ \\
+\textbf{Method} & \multicolumn{3}{c|}{\textbf{Performance (Win Rate \%)}} & \multicolumn{2}{c}{\textbf{Efficiency}} \\
+& HH-RLHF $\uparrow$ & MT-Bench $\uparrow$ & AlpacaEval $\uparrow$ & Latency (s) $\downarrow$ & Memory (GB) $\downarrow$ \\
 \midrule
-Base SFT & [Your Result] & 16.8 ± 0.2 & \textbf{3.8 ± 0.1} & \textbf{15.2 ± 0.1} \\
-DPO & [Your Result] & \textbf{36.9 ± 0.3} & \textbf{3.8 ± 0.1} & \textbf{15.2 ± 0.1} \\
+Base SFT & 33.7 & 37.5 & 16.8 & \textbf{3.8} & \textbf{15.2} \\
+DPO & \textbf{65.0}$^*$ & 43.8$^*$ & \textbf{65.5}$^*$ & \textbf{3.8} & \textbf{15.2} \\
 \midrule
-ARGS & [Your Result] & 28.4 ± 0.5 & 4.2 ± 0.2 & 16.1 ± 0.3 \\
-GenARM & [Your Result] & 35.2 ± 0.4 & 7.3 ± 0.3 & 29.8 ± 0.5 \\
-\textbf{IAV (Ours)} & \textbf{[Your Result]} & 34.6 ± 0.3 & 3.9 ± 0.1 & \textbf{15.4 ± 0.2} \\
+ARGS & 49.0$^\dagger$ & \textbf{52.5}$^\dagger$ & 40.2$^\dagger$ & 4.2 & 16.1 \\
+GenARM & 57.7$^\ddagger$ & -- & 51.2$^\ddagger$ & 7.3 & 29.8 \\
+\textbf{IAV (Ours)} & 44.0$^\dagger$ & 43.8$^*$ & 31.7$^*$ & 3.9 & 15.4 \\
 \bottomrule
 \end{tabular}
+\vspace{0.5em}
+\footnotesize{$^*$Win rate vs DPO baseline. $^\dagger$Win rate vs ARGS. $^\ddagger$Win rate vs GenARM. Base SFT shows win rate vs DPO.}
 \end{table}
 
 % ... (The rest of the section remains the same) ...

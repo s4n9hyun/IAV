@@ -7,15 +7,15 @@ OUTPUT_DIR="./outputs"
 CACHE_FILE="cache.pkl"
 
 # Hyperparameters (modify these for different experiments)
-BETA=${BETA:-0.1}
-LAMBDA_KL=${LAMBDA_KL:-0.05}
-LAMBDA_L2=${LAMBDA_L2:-0.005}
-LR=${LR:-5e-6}
+BETA=${BETA:-0.1} # fixed
+LAMBDA_KL=${LAMBDA_KL:-0.1}
+LAMBDA_L2=${LAMBDA_L2:-0.01} # fixed
+LR=${LR:-2e-6}
 
 echo "Beta: $BETA, Lambda_KL: $LAMBDA_KL, Lambda_L2: $LAMBDA_L2, LR: $LR"
 
 # Use single GPU to avoid NCCL timeout issues
-CUDA_VISIBLE_DEVICES=0 accelerate launch --num_processes=1 \
+CUDA_VISIBLE_DEVICES=1 accelerate launch --num_processes=1 \
     src/training/train_main.py \
     --model_name $MODEL_NAME \
     --output_dir $OUTPUT_DIR \
