@@ -1,0 +1,13 @@
+# Core dependencies for Dual-Head evaluation
+numpy>=1.21.0
+tqdm>=4.64.0
+nltk>=3.7
+
+# Optional dependencies for enhanced evaluation
+simcse>=0.4.0  # For coherence computation
+openai>=1.0.0  # For GPT-4 evaluations
+torch>=1.9.0   # Required by SimCSE
+transformers>=4.20.0  # Required by SimCSE
+
+# Development and utilities
+pathlib2>=2.3.5  # For older Python compatibility

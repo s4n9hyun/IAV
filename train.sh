@@ -1,39 +1,58 @@
 #!/bin/bash
 
-# Train IAV model with parameter-based naming (following GenARM convention)
+# Train MAV - Multi-Layer Alignment Model
 
 MODEL_NAME="argsearch/llama-7b-sft-float32"
-OUTPUT_DIR="./outputs"
-CACHE_FILE="cache.pkl"
+MODEL_NAME_SCRIPT="mav-llama-7b-sft"  # Simplified name for directory
+LAYER_SELECTION=${LAYER_SELECTION:-auto}  # auto or uniform
+DATASET_NAME=${DATASET_NAME:-"Dahoas/full-hh-rlhf"}  # Dataset name
 
-# Hyperparameters (modify these for different experiments)
-BETA=${BETA:-0.1} # fixed
-LAMBDA_KL=${LAMBDA_KL:-0.1}
-LAMBDA_L2=${LAMBDA_L2:-0.01} # fixed
-LR=${LR:-2e-6}
+# Hyperparameters  
+EPOCH=${EPOCH:-1}
+BETA=${BETA:-0.05} 
+LAMBDA_L2=${LAMBDA_L2:-0.05}  # L2 regularization
+LR=${LR:-5e-4}  # Learning rate
+BATCH_SIZE=${BATCH_SIZE:-16}
+GRAD_ACCUM=${GRAD_ACCUM:-1}
 
-echo "Beta: $BETA, Lambda_KL: $LAMBDA_KL, Lambda_L2: $LAMBDA_L2, LR: $LR"
+# Automatically generate experiment name
+DATASET_SHORT=$(echo $DATASET_NAME | cut -d'/' -f2 | cut -d'-' -f1-2)  # "full-hh" from "Dahoas/full-hh-rlhf"
+EXP_NAME=${MODEL_NAME_SCRIPT}-${DATASET_SHORT}-epoch_${EPOCH}-beta_${BETA}-lr_${LR}-l2_${LAMBDA_L2}
 
-# Use single GPU to avoid NCCL timeout issues
-CUDA_VISIBLE_DEVICES=1 accelerate launch --num_processes=1 \
-    src/training/train_main.py \
+OUTPUT_DIR="./outputs/mav/${EXP_NAME}"
+
+# Check if directory exists
+if [ -d "${OUTPUT_DIR}" ]; then
+    echo -e "\n\n"
+    echo "Error: Directory '${OUTPUT_DIR}' already exists. Please delete it or change hyperparameters." >&2
+    exit 1
+fi
+
+echo "🚀 Training MAV - Multi-Layer Alignment"
+echo "Base model: $MODEL_NAME (FROZEN)"
+echo "Dataset: $DATASET_NAME"
+echo "Experiment: $EXP_NAME"
+echo "Output dir: $OUTPUT_DIR"
+echo "Beta: $BETA, Lambda_L2: $LAMBDA_L2, LR: $LR"
+echo "Batch size: ${BATCH_SIZE} x ${GRAD_ACCUM} = $((BATCH_SIZE * GRAD_ACCUM))"
+
+# Use single GPU with smaller batch size
+CUDA_VISIBLE_DEVICES=0 accelerate launch --num_processes=1 train.py \
     --model_name $MODEL_NAME \
     --output_dir $OUTPUT_DIR \
-    --use_param_naming \
-    --num_train_epochs 1 \
-    --per_device_train_batch_size 16 \
-    --gradient_accumulation_steps 1\
+    --layer_selection $LAYER_SELECTION \
+    --dataset_name $DATASET_NAME \
+    --num_epochs $EPOCH \
+    --batch_size $BATCH_SIZE \
+    --grad_accum $GRAD_ACCUM \
     --learning_rate $LR \
-    --warmup_steps 100 \
-    --save_steps 2000 \
-    --eval_steps 999999 \
-    --max_prompt_length 512 \
+    --warmup_steps 200 \
+    --save_steps 1000 \
+    --eval_steps 1000 \
     --max_length 1024 \
     --beta $BETA \
-    --lambda_kl $LAMBDA_KL \
     --lambda_l2 $LAMBDA_L2 \
     --bf16 \
-    --cache_file $CACHE_FILE \
     --resume_from_checkpoint True
 
-echo "IAV training complete."
+echo "✅ MAV training complete! Saved to: $OUTPUT_DIR"
