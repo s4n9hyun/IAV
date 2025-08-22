@@ -299,7 +299,7 @@ def generate_base_model_responses(num_samples=300, dataset_name="hh_rlhf", rando
         
         # Save results
         # Save to dataset-specific subdirectory
-        output_dir = f"/home/ibel/research/MAV/evaluation/{dataset_name}"
+        output_dir = f"/home/ibel/research/MAV/evaluation/outputs/{dataset_name}"
         os.makedirs(output_dir, exist_ok=True)
         output_file = f"{output_dir}/base_model_{dataset_name}_responses_{num_samples}.json"
         os.makedirs(os.path.dirname(output_file), exist_ok=True)

@@ -343,7 +343,7 @@ def generate_args_responses(num_samples=300, dataset_name="hh_rlhf", random_seed
         # Save results
         # Save to dataset-specific subdirectory
         import os
-        output_dir = f"/home/ibel/research/MAV/evaluation/{dataset_name}"
+        output_dir = f"/home/ibel/research/MAV/evaluation/outputs/{dataset_name}"
         os.makedirs(output_dir, exist_ok=True)
         output_file = f"{output_dir}/args_{dataset_name}_responses_{num_samples}.json"
         os.makedirs(os.path.dirname(output_file), exist_ok=True)

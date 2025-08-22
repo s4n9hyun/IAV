@@ -169,7 +169,7 @@ from inference import MAVInference
 
 # Create inference model (automatically multi-layer)
 inference_model = MAVInference(
-    alignment_checkpoint_path="./outputs/mav/best_alignment.pt",
+    alignment_checkpoint_path="./outputs/mav/hierarchical-mav-llama-7b-sft-full-hh-epoch_1-beta_0.05-lr_5e-4-l2_0.001/best_alignment.pt",
     initial_base_model="argsearch/llama-7b-sft-float32"
 )
 

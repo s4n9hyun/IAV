@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 GPT-5 Evaluation Script for Model Comparison
-Usage: python gpt5_eval.py --red mav --blue args --dataset mt_bench
+Usage: python gpt5_eval.py --red mav --blue genarm --dataset hh_rlhf
 """
 
 from tqdm import tqdm
@@ -88,10 +88,10 @@ def load_model_responses(model_name: str, dataset: str) -> list:
     
     file_mapping = {
         'dpo': f'dpo_{dataset}_responses_{sample_count}.json',
-        'genarm': f'genarm_{dataset}_responses_{sample_count}_alpha_1.0.json',
+        'genarm': f'genarm_{dataset}_responses_{sample_count}.json',
         'base_model': f'base_model_{dataset}_responses_{sample_count}.json',
         'args': f'args_{dataset}_responses_{sample_count}.json',
-        'mav': f'mav_{dataset}_responses_{sample_count}_alpha_1.0.json'
+        'mav': f'mav_1e-5_{dataset}_responses_{sample_count}.json'
     }
     
     file_path = Path(outputs_dir) / file_mapping[model_name]

@@ -222,9 +222,9 @@ def generate_genarm_responses(num_samples=300, dataset_name="hh_rlhf", random_se
                 torch.cuda.empty_cache()
         
         # Save results
-        output_dir = f"/home/ibel/research/MAV/evaluation/{dataset_name}"
+        output_dir = f"/home/ibel/research/MAV/evaluation/outputs/{dataset_name}"
         os.makedirs(output_dir, exist_ok=True)
-        output_file = f"{output_dir}/genarm_{dataset_name}_responses_{num_samples}_alpha_{alpha}.json"
+        output_file = f"{output_dir}/genarm_{dataset_name}_responses_{num_samples}.json"
         
         with open(output_file, 'w') as f:
             json.dump(results, f, indent=2)

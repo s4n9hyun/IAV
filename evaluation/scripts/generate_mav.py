@@ -35,9 +35,9 @@ def generate_mav_responses(num_samples=300, dataset_name="hh_rlhf", random_seed=
     # Configuration
     base_model = "argsearch/llama-7b-sft-float32"
     
-    # Default checkpoint path if not provided
+    # Default checkpoint path if not provided - use newly trained model
     if checkpoint_path is None:
-        checkpoint_path = "/home/ibel/research/MAV/outputs/mav/mav-llama-7b-sft-full-hh-epoch_1-beta_0.1-lr_5e-5-l2_0.1/best_alignment.pt"
+        checkpoint_path = "/home/ibel/research/MAV/outputs/mav/simplified-mav-llama-7b-sft-full-hh-epoch_1-beta_0.1-lr_5e-5-l2_0.001/alignment_step_3151.pt"
     
     try:
         # Use GPU 1 if available (GPU 0 might be occupied)
@@ -233,9 +233,9 @@ def generate_mav_responses(num_samples=300, dataset_name="hh_rlhf", random_seed=
                 torch.cuda.empty_cache()
         
         # Save results
-        output_dir = f"/home/ibel/research/MAV/evaluation/{dataset_name}"
+        output_dir = f"/home/ibel/research/MAV/evaluation/outputs/{dataset_name}"
         os.makedirs(output_dir, exist_ok=True)
-        output_file = f"{output_dir}/mav_{dataset_name}_responses_{num_samples}_alpha_{alpha}.json"
+        output_file = f"{output_dir}/mav_{dataset_name}_responses_{num_samples}.json"
         
         with open(output_file, 'w') as f:
             json.dump(results, f, indent=2)

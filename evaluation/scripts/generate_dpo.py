@@ -31,8 +31,8 @@ def generate_dpo_responses(num_samples=300, dataset_name="hh_rlhf", random_seed=
     
     # Configuration
     base_model = "argsearch/llama-7b-sft-float32"
-    # Use the specified DPO model
-    dpo_path = "/home/ibel/research/dpo_1epoch_lr_5e-6/outputs/dpo"
+    # Use the best performing DPO model
+    dpo_path = "/home/ibel/research/dpo/args-llama-sft-7b-dpo-HH-epoch_1-beta_0.1-lr_5e-4-bs_32"
     
     # Generation parameters (consistent with other models for fair comparison)
     temperature = 1.0  # Use same as other models
@@ -287,7 +287,7 @@ def generate_dpo_responses(num_samples=300, dataset_name="hh_rlhf", random_seed=
         
         # Save results
         # Save to dataset-specific subdirectory
-        output_dir = f"/home/ibel/research/MAV/evaluation/{dataset_name}"
+        output_dir = f"/home/ibel/research/MAV/evaluation/outputs/{dataset_name}"
         os.makedirs(output_dir, exist_ok=True)
         output_file = f"{output_dir}/dpo_{dataset_name}_responses_{num_samples}.json"
         os.makedirs(os.path.dirname(output_file), exist_ok=True)

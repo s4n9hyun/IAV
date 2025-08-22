@@ -26,15 +26,13 @@ class MAVInference:
         alignment_type = alignment_config.get("alignment_type", "large")
         layer_selection = alignment_config.get("layer_selection", "auto")
         
-        print(f"Creating MAV (591.4M parameters)...")
-        print(f"Layer selection: {layer_selection}")
+        print(f"Creating Simple MAV (268M alignment parameters)...")
         
         # Create model
         self.model = create_mav(
             base_model_name=initial_base_model,
             device=device,
-            torch_dtype=torch_dtype,
-            layer_selection=layer_selection
+            torch_dtype=torch_dtype
         )
         
         # Load alignment weights
@@ -47,22 +45,6 @@ class MAVInference:
         
         # Print system info
         self.print_system_info()
-    
-    def switch_base_model(self, model_name):
-        """Switch to a different base model at runtime."""
-        print(f"\n🔄 Switching base model to: {model_name}")
-        
-        # Update base model
-        self.model.switch_base_model(model_name)
-        
-        # Update tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.tokenizer.pad_token = self.tokenizer.eos_token
-        
-        # Print updated info
-        self.print_system_info()
-        
-        print(f"✅ Successfully switched to {model_name}")
     
     def print_system_info(self):
         """Print current system information."""
@@ -77,16 +59,17 @@ class MAVInference:
         print(f"    - Hidden size: {base_info['hidden_size']}")
         print(f"    - Vocab size: {base_info['vocab_size']}")
         
-        print(f"  Alignment Model: Multi-layer")
+        print(f"  Alignment Model: Hierarchical Attention")
         print(f"    - Parameters: {alignment_info['parameters_M']:.1f}M")
+        print(f"    - Reference vectors: {self.model.alignment_model.num_alignment_refs}")
         
         print(f"  Compatibility:")
         print(f"    - Adaptive pooling: {'Needed' if compatibility['adaptive_pooling_needed'] else 'Not needed'}")
         print(f"    - Pooling ratio: {compatibility['pooling_ratio']:.2f}")
         print(f"    - Vocab compatible: {'✅' if compatibility['vocab_compatible'] else '❌'}")
     
-    def generate_response(self, prompt, max_length=128, alpha=1.0, temperature=0.7, 
-                         do_sample=True, top_p=0.9):
+    def generate_response(self, prompt, max_length=128, alpha=1.0, temperature=1.0, 
+                         do_sample=False, top_p=1.0):
         """Generate response with alignment control."""
         
         # Tokenize
@@ -130,38 +113,16 @@ class MAVInference:
             print(f"\nAlpha = {alpha:.1f}:")
             print(f"Response: {result['response']}")
             print(f"Avg alignment strength: {result['stats']['avg_alignment_strength']:.4f}")
+            
+            # Show attention info if available
+            if 'attention_info' in result['stats']:
+                attention_info = result['stats']['attention_info']
+                if attention_info and 'active_refs' in attention_info:
+                    active_ref = attention_info['active_refs'][0].item()
+                    print(f"Most active reference vector: #{active_ref}")
         
         return results
     
-    def demonstrate_model_switching(self, prompt, models_to_try, alpha=1.0):
-        """Demonstrate switching between different base models."""
-        print(f"\n🌍 Demonstrating model switching capabilities:")
-        print(f"Prompt: {prompt}")
-        print("=" * 80)
-        
-        results = []
-        for model_name in models_to_try:
-            try:
-                print(f"\n--- Using {model_name} ---")
-                self.switch_base_model(model_name)
-                
-                result = self.generate_response(prompt, alpha=alpha, max_length=100)
-                results.append({
-                    "model": model_name,
-                    "result": result
-                })
-                
-                print(f"Response: {result['response']}")
-                print(f"Alignment strength: {result['stats']['avg_alignment_strength']:.4f}")
-                
-            except Exception as e:
-                print(f"❌ Error with {model_name}: {e}")
-                results.append({
-                    "model": model_name,
-                    "error": str(e)
-                })
-        
-        return results
 
 
 def main():
@@ -180,7 +141,6 @@ def main():
     
     # Demos
     parser.add_argument("--demo_alpha_comparison", action="store_true", help="Demo alpha comparison")
-    parser.add_argument("--demo_model_switching", action="store_true", help="Demo model switching")
     
     # Options
     parser.add_argument("--bf16", action="store_true", help="Use bfloat16")
@@ -221,19 +181,7 @@ def main():
     if args.demo_alpha_comparison:
         inference_model.compare_alphas(args.prompt)
     
-    # Model switching demo
-    if args.demo_model_switching:
-        # Try different models (some might not be available)
-        models_to_try = [
-            "argsearch/llama-7b-sft-float32",
-            "mistralai/Mistral-7B-v0.1",
-            # Add more models if available
-        ]
-        
-        inference_model.demonstrate_model_switching(args.prompt, models_to_try)
-    
     print(f"\n🎉 MAV inference complete!")
-    print(f"💡 Try switching base models with --demo_model_switching")
     print(f"💡 Try different alpha values with --demo_alpha_comparison")
 
 

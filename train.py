@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from transformers import AutoTokenizer, get_linear_schedule_with_warmup
+from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
 from accelerate import Accelerator
 from typing import Dict, Tuple
 from tqdm import tqdm
@@ -19,7 +19,7 @@ from data import PreferenceDataset, load_preference_data
 class AlignmentLoss(nn.Module):
     """Alignment loss function."""
     
-    def __init__(self, beta=0.1, lambda_l2=0.01):
+    def __init__(self, beta=0.1, lambda_l2=0.001):
         super().__init__()
         self.beta = beta
         self.lambda_l2 = lambda_l2
@@ -43,10 +43,12 @@ class AlignmentLoss(nn.Module):
         return preference_loss
     
     def compute_l2_regularization(self, alignment_vector, attention_mask):
-        """L2 regularization."""
+        """L2 regularization with target norm to encourage non-zero alignment."""
         l2_norms = alignment_vector.norm(dim=-1)  # [batch_size, seq_len]
-        l2_norms = l2_norms * attention_mask
-        return l2_norms.sum() / (attention_mask.sum() + 1e-8)
+        # Encourage norm around 1.0 instead of 0
+        target_norm = 1.0
+        l2_penalty = ((l2_norms - target_norm) ** 2) * attention_mask
+        return l2_penalty.sum() / (attention_mask.sum() + 1e-8)
     
     
     def _get_log_probs(self, logits, labels):
@@ -84,8 +86,8 @@ class AlignmentTrainer:
     """Trains alignment model only."""
     
     def __init__(self, model, tokenizer, train_dataloader, val_dataloader=None,
-                 learning_rate=5e-4, num_epochs=1, warmup_steps=100, gradient_accumulation_steps=1,
-                 max_grad_norm=1.0, beta=0.1, lambda_l2=0.01, accelerator=None,
+                 learning_rate=1e-5, num_epochs=2, warmup_steps=1000, gradient_accumulation_steps=2,
+                 max_grad_norm=0.5, beta=0.1, lambda_l2=0.01, accelerator=None,
                  save_dir="./checkpoints", save_steps=1000, eval_steps=500):
         
         self.model = model
@@ -94,18 +96,26 @@ class AlignmentTrainer:
         self.val_dataloader = val_dataloader
         self.accelerator = accelerator
         
-        # Only alignment params
-        alignment_params = list(self.model.alignment_model.parameters())
+        # Only alignment params - handle accelerator wrapping
+        if hasattr(self.model, 'alignment_model'):
+            alignment_params = list(self.model.alignment_model.parameters())
+        else:
+            # Model is wrapped by accelerator, unwrap it
+            alignment_params = list(self.model.module.alignment_model.parameters())
         
-        # Verify frozen
-        base_trainable = sum(p.numel() for p in self.model.base_model.parameters() if p.requires_grad)
+        # Verify frozen - handle accelerator wrapping
+        if hasattr(self.model, 'base_model'):
+            base_trainable = sum(p.numel() for p in self.model.base_model.parameters() if p.requires_grad)
+        else:
+            base_trainable = sum(p.numel() for p in self.model.module.base_model.parameters() if p.requires_grad)
+        
         if base_trainable > 0:
             raise RuntimeError(f"Base model has {base_trainable} trainable parameters! Should be 0.")
         
         self.optimizer = torch.optim.AdamW(alignment_params, lr=learning_rate, weight_decay=0.01)
         
         total_steps = len(train_dataloader) * num_epochs // gradient_accumulation_steps
-        self.scheduler = get_linear_schedule_with_warmup(self.optimizer, warmup_steps, total_steps)
+        self.scheduler = get_cosine_schedule_with_warmup(self.optimizer, warmup_steps, total_steps)
         
         # Prep accelerator
         if self.accelerator:
@@ -124,19 +134,45 @@ class AlignmentTrainer:
     def train(self, start_epoch=0, start_step=0):
         """Training loop."""
         
-        # Set modes
-        self.model.base_model.eval()  # Frozen
-        self.model.alignment_model.train()  # Trainable
+        # Set modes - handle accelerator wrapping
+        if hasattr(self.model, 'base_model'):
+            self.model.base_model.eval()  # Frozen
+            self.model.alignment_model.train()  # Trainable
+        else:
+            self.model.module.base_model.eval()  # Frozen
+            self.model.module.alignment_model.train()  # Trainable
         
         global_step = start_step
         best_val_loss = float('inf')
         
+        # Calculate steps to skip when resuming
+        steps_per_epoch = len(self.train_dataloader) // self.gradient_accumulation_steps
+        
         for epoch in range(start_epoch, self.num_epochs):
             epoch_losses = []
             
-            progress_bar = tqdm(self.train_dataloader, desc=f"Epoch {epoch + 1}/{self.num_epochs} (Alignment Only)")
+            # Calculate how many batches to skip
+            if epoch == start_epoch and start_step > 0:
+                # Calculate number of raw batches to skip (before gradient accumulation)
+                batches_to_skip = start_step * self.gradient_accumulation_steps - epoch * len(self.train_dataloader)
+                if batches_to_skip < 0:
+                    batches_to_skip = 0
+            else:
+                batches_to_skip = 0
+            
+            # Adjust progress bar to show resume progress correctly
+            initial_step = (start_step * self.gradient_accumulation_steps) if epoch == start_epoch else 0
+            progress_bar = tqdm(
+                self.train_dataloader, 
+                desc=f"Epoch {epoch + 1}/{self.num_epochs} (Alignment Only)",
+                initial=initial_step if epoch == start_epoch and start_step > 0 else 0
+            )
             
             for step, batch in enumerate(progress_bar):
+                # Skip already processed batches when resuming
+                if batches_to_skip > 0:
+                    batches_to_skip -= 1
+                    continue
                 if not self.accelerator:
                     batch = {k: v.to("cuda") for k, v in batch.items()}
                 
@@ -154,9 +190,10 @@ class AlignmentTrainer:
                 ], dim=0)
                 
                 # Single forward pass for both chosen and rejected
+                # Use standard alpha=1.0 for hierarchical attention (no amplification needed)
                 combined_outputs = self.model(
                     combined_input_ids, combined_attention_mask,
-                    alpha=1.0, return_components=True
+                    alpha=1.0, return_components=True  # Standard alpha for attention-based alignment
                 )
                 
                 # Split outputs back into chosen and rejected
@@ -188,14 +225,29 @@ class AlignmentTrainer:
                 # Step
                 if (step + 1) % self.gradient_accumulation_steps == 0:
                     if self.accelerator:
-                        self.accelerator.clip_grad_norm_(self.model.alignment_model.parameters(), self.max_grad_norm)
+                        # Accelerator handles the unwrapping internally
+                        alignment_params = self.model.alignment_model.parameters() if hasattr(self.model, 'alignment_model') else self.model.module.alignment_model.parameters()
+                        self.accelerator.clip_grad_norm_(alignment_params, self.max_grad_norm)
                     else:
-                        torch.nn.utils.clip_grad_norm_(self.model.alignment_model.parameters(), self.max_grad_norm)
+                        alignment_params = self.model.alignment_model.parameters() if hasattr(self.model, 'alignment_model') else self.model.module.alignment_model.parameters()
+                        torch.nn.utils.clip_grad_norm_(alignment_params, self.max_grad_norm)
                     
                     self.optimizer.step()
                     self.scheduler.step()
                     self.optimizer.zero_grad()
                     global_step += 1
+                    
+                    # Save and validate ONLY after gradient step
+                    if not self.accelerator or self.accelerator.is_main_process:
+                        if global_step > 0 and global_step % self.save_steps == 0:
+                            self.save_checkpoint(epoch, global_step, best=False)
+                        
+                        # Validate
+                        if self.val_dataloader and global_step > 0 and global_step % self.eval_steps == 0:
+                            val_loss = self.validate()
+                            if val_loss < best_val_loss:
+                                best_val_loss = val_loss
+                                self.save_checkpoint(epoch, global_step, best=True)
                 
                 epoch_losses.append(loss_components["total_loss"])
                 progress_bar.set_postfix({
@@ -204,26 +256,19 @@ class AlignmentTrainer:
                     "l2": f"{loss_components['l2_loss']:.4f}",
                     "step": global_step
                 })
-                
-                # Save
-                if not self.accelerator or self.accelerator.is_main_process:
-                    if global_step > 0 and global_step % self.save_steps == 0:
-                        self.save_checkpoint(epoch, global_step, best=False)
-                    
-                    # Validate
-                    if self.val_dataloader and global_step > 0 and global_step % self.eval_steps == 0:
-                        val_loss = self.validate()
-                        if val_loss < best_val_loss:
-                            best_val_loss = val_loss
-                            self.save_checkpoint(epoch, global_step, best=True)
             
             # Save final checkpoint
             self.save_checkpoint(epoch, global_step, best=False)
     
     def validate(self):
         """Validation loop."""
-        self.model.base_model.eval()
-        self.model.alignment_model.eval()
+        # Set modes - handle accelerator wrapping
+        if hasattr(self.model, 'base_model'):
+            self.model.base_model.eval()
+            self.model.alignment_model.eval()
+        else:
+            self.model.module.base_model.eval()
+            self.model.module.alignment_model.eval()
         
         val_losses = []
         
@@ -273,7 +318,11 @@ class AlignmentTrainer:
                 except Exception:
                     continue
         
-        self.model.alignment_model.train()  # Back to training
+        # Back to training - handle accelerator wrapping
+        if hasattr(self.model, 'alignment_model'):
+            self.model.alignment_model.train()
+        else:
+            self.model.module.alignment_model.train()
         
         if not val_losses:
             return float('inf')
@@ -286,11 +335,15 @@ class AlignmentTrainer:
         if self.accelerator and not self.accelerator.is_main_process:
             return
         
-        # Only save alignment model state
+        # Only save alignment model state - handle accelerator wrapping
         if self.accelerator:
-            alignment_state_dict = self.accelerator.unwrap_model(self.model.alignment_model).state_dict()
+            # Get alignment model, handling nested wrapping
+            if hasattr(self.model, 'alignment_model'):
+                alignment_state_dict = self.accelerator.unwrap_model(self.model.alignment_model).state_dict()
+            else:
+                alignment_state_dict = self.accelerator.unwrap_model(self.model.module.alignment_model).state_dict()
         else:
-            alignment_state_dict = self.model.alignment_model.state_dict()
+            alignment_state_dict = self.model.alignment_model.state_dict() if hasattr(self.model, 'alignment_model') else self.model.module.alignment_model.state_dict()
         
         checkpoint = {
             "epoch": epoch,
@@ -299,10 +352,11 @@ class AlignmentTrainer:
             "optimizer_state_dict": self.optimizer.state_dict(),
             "scheduler_state_dict": self.scheduler.state_dict(),
             "model_config": {
-                "layer_selection": "auto",
-                "target_size": getattr(self.model.alignment_model, 'target_size', 4096),
-                "vocab_size": getattr(self.model.alignment_model, 'vocab_size', 32000),
-                "layer_selection": "auto",  # Default to auto
+                "alignment_type": "hierarchical_attention",
+                "num_alignment_refs": 32,
+                "max_seq_len": 2048,
+                "hidden_size": 4096,
+                "vocab_size": 32000,
             }
         }
         
@@ -319,10 +373,15 @@ class AlignmentTrainer:
         
         if "alignment_model_state_dict" in checkpoint:
             if self.accelerator:
-                unwrapped_model = self.accelerator.unwrap_model(self.model.alignment_model)
+                # Handle accelerator wrapping
+                if hasattr(self.model, 'alignment_model'):
+                    unwrapped_model = self.accelerator.unwrap_model(self.model.alignment_model)
+                else:
+                    unwrapped_model = self.accelerator.unwrap_model(self.model.module.alignment_model)
                 unwrapped_model.load_state_dict(checkpoint["alignment_model_state_dict"])
             else:
-                self.model.alignment_model.load_state_dict(checkpoint["alignment_model_state_dict"])
+                alignment_model = self.model.alignment_model if hasattr(self.model, 'alignment_model') else self.model.module.alignment_model
+                alignment_model.load_state_dict(checkpoint["alignment_model_state_dict"])
         
         if "optimizer_state_dict" in checkpoint:
             self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -342,28 +401,26 @@ def main():
     # Model
     parser.add_argument("--model_name", default="argsearch/llama-7b-sft-float32", help="Base model (frozen)")
     parser.add_argument("--output_dir", default="./outputs/mav", help="Output directory")
-    parser.add_argument("--layer_selection", default="auto", choices=["auto", "uniform"], 
-                       help="Layer selection strategy")
     
     # Dataset
-    parser.add_argument("--dataset_name", default="Anthropic/hh-rlhf", help="Dataset name for preference data")
+    parser.add_argument("--dataset_name", default="Dahoas/full-hh-rlhf", help="Dataset name for preference data")
     parser.add_argument("--dataset_split", default="train", help="Dataset split to use")
     
     # Training
-    parser.add_argument("--num_epochs", type=int, default=1)
-    parser.add_argument("--batch_size", type=int, default=8, help="Smaller default due to larger model")
-    parser.add_argument("--grad_accum", type=int, default=2, help="More accumulation due to larger model")
-    parser.add_argument("--learning_rate", type=float, default=1e-4, help="Lower LR for larger model")
+    parser.add_argument("--num_epochs", type=int, default=2)
+    parser.add_argument("--batch_size", type=int, default=8, help="Conservative batch size for stable training")
+    parser.add_argument("--grad_accum", type=int, default=2, help="Gradient accumulation for effective batch size 16")
+    parser.add_argument("--learning_rate", type=float, default=5e-5, help="Learning rate for alignment model")
     
     # Schedule
-    parser.add_argument("--warmup_steps", type=int, default=200)
+    parser.add_argument("--warmup_steps", type=int, default=1000, help="Longer warmup for stable training")
     parser.add_argument("--eval_steps", type=int, default=500)
     parser.add_argument("--save_steps", type=int, default=1000)
     
     # Hyperparameters
     parser.add_argument("--max_length", type=int, default=1024, help="Maximum sequence length")
     parser.add_argument("--beta", type=float, default=0.1, help="DPO beta")
-    parser.add_argument("--lambda_l2", type=float, default=0.001, help="Lower L2 for larger model")
+    parser.add_argument("--lambda_l2", type=float, default=0.001, help="L2 regularization for alignment vectors")
     
     # Optimization
     parser.add_argument("--bf16", action="store_true", help="Use bfloat16")
@@ -380,9 +437,9 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     
     if accelerator.is_main_process:
-        print(f"🌍 Training MAV - Multi-layer alignment for ANY LLaMA family model!")
-        print(f"💪 Architecture: 591.4M parameters")
-        print(f"🧠 Layer selection: {args.layer_selection}")
+        print(f"🌍 Training MAV - Simplified Cross-Attention Alignment!")
+        print(f"💪 Architecture: Cross-Attention Only (~200M parameters)")
+        print(f"🧠 Attention: Cross-Attention + Position-aware (simplified)")
     
     # Tokenizer
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
@@ -392,8 +449,7 @@ def main():
     model = create_mav(
         base_model_name=args.model_name,
         device="cpu",  # Let accelerator handle device placement
-        torch_dtype=torch.bfloat16 if args.bf16 else torch.float32,
-        layer_selection=args.layer_selection
+        torch_dtype=torch.bfloat16 if args.bf16 else torch.float32
     )
     
     if accelerator.is_main_process:
@@ -407,17 +463,15 @@ def main():
         print(f"    - Hidden size: {base_info['hidden_size']}")
         print(f"    - Vocab size: {base_info['vocab_size']}")
         
-        print(f"  Alignment Model: Multi-layer")
+        print(f"  Alignment Model: Simplified Cross-Attention")
         print(f"    - Parameters: {alignment_info['parameters_M']:.1f}M (TRAINABLE)")
-        print(f"    - Target size: {alignment_info['target_size']}")
-        print(f"    - Layer fusion: {model.alignment_model.num_layers} layers -> single representation")
+        print(f"    - Architecture: Cross-Attention + Position-Aware (no self-attention)")
+        print(f"    - Alignment refs: {model.alignment_model.num_alignment_refs} reference vectors")
         
         print(f"  Compatibility:")
         print(f"    - Adaptive pooling: {'✓' if system_info['compatibility']['adaptive_pooling_needed'] else '✗'}")
         print(f"    - Pooling ratio: {system_info['compatibility']['pooling_ratio']:.2f}")
         print(f"    - Vocab compatible: {'✓' if system_info['compatibility']['vocab_compatible'] else '✗'}")
-        if model.layer_indices:
-            print(f"    - Multi-layer indices: {model.layer_indices}")
     
     # Data
     all_data = load_preference_data(dataset_name=args.dataset_name, split=args.dataset_split)

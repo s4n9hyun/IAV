@@ -29,9 +29,9 @@ def evaluate_controllability(num_samples=50, dataset_name="hh_rlhf", checkpoint_
     # Configuration
     base_model = "argsearch/llama-7b-sft-float32"
     
-    # Default checkpoint path if not provided
+    # Default checkpoint path if not provided - use new hierarchical attention model
     if checkpoint_path is None:
-        checkpoint_path = "/home/ibel/research/MAV/outputs/mav/mav-llama-7b-sft-full-hh-epoch_1-beta_0.1-lr_5e-5-l2_0.1/best_alignment.pt"
+        checkpoint_path = "/home/ibel/research/MAV/outputs/mav/simplified-mav-llama-7b-sft-full-hh-epoch_1-beta_0.1-lr_1e-5-l2_0.01/alignment_step_3151.pt"
     
     try:
         # Use GPU 1 if available (GPU 0 might be occupied)
@@ -85,7 +85,7 @@ def evaluate_controllability(num_samples=50, dataset_name="hh_rlhf", checkpoint_
                 prompt = full_conversation + assistant_separator
             
             sample_results = {
-                "sample_id": selected_indices[i],
+                "sample_id": int(selected_indices[i]),
                 "prompt": prompt,
                 "responses": {},
                 "alignment_strengths": {},
@@ -112,7 +112,7 @@ def evaluate_controllability(num_samples=50, dataset_name="hh_rlhf", checkpoint_
                     generated_text = full_response[len(prompt):].strip()
                     
                     sample_results["responses"][f"alpha_{alpha}"] = generated_text
-                    sample_results["alignment_strengths"][f"alpha_{alpha}"] = response_data["stats"]["avg_alignment_strength"]
+                    sample_results["alignment_strengths"][f"alpha_{alpha}"] = float(response_data["stats"]["avg_alignment_strength"])
                     
                     responses.append(generated_text)
                     alignment_strengths.append(response_data["stats"]["avg_alignment_strength"])
@@ -129,10 +129,10 @@ def evaluate_controllability(num_samples=50, dataset_name="hh_rlhf", checkpoint_
             # Calculate diversity metrics
             sample_results["diversity_metrics"] = calculate_diversity_metrics(responses)
             sample_results["alignment_strength_range"] = {
-                "min": min(alignment_strengths),
-                "max": max(alignment_strengths),
-                "range": max(alignment_strengths) - min(alignment_strengths),
-                "std": np.std(alignment_strengths)
+                "min": float(min(alignment_strengths)),
+                "max": float(max(alignment_strengths)),
+                "range": float(max(alignment_strengths) - min(alignment_strengths)),
+                "std": float(np.std(alignment_strengths))
             }
             
             results.append(sample_results)
@@ -148,7 +148,7 @@ def evaluate_controllability(num_samples=50, dataset_name="hh_rlhf", checkpoint_
         overall_stats = calculate_overall_statistics(results, alpha_values)
         
         # Save results
-        output_dir = "/home/ibel/research/MAV/evaluation"
+        output_dir = "/home/ibel/research/MAV/evaluation/controllability"
         os.makedirs(output_dir, exist_ok=True)
         output_file = f"{output_dir}/controllability_evaluation_{num_samples}_samples.json"
         
